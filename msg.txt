@@ -1,0 +1,5 @@
+Update Nearby Airports styling and clean up comments
+
+- Updated Nearby Airports ICAO code and map hover popup label color to #FED8B1.
+- Sanitized codebase by removing all references to "SandCat" and "SandCat algorithms" in comments across background.js and content_main.js.
+- Bumped extension version to 2.2 in manifest.json.

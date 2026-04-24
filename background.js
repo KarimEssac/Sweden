@@ -20,7 +20,7 @@ let FBOS_LOADING = false;
 
 const _routeCache = new Map(); // callsign → { ts, data } for adsbdb.com route lookups
 
-// OurAirports name lookup (lazy-loaded, mirrors Sandcat's GET_AIRPORT_NAME)
+// OurAirports name lookup (lazy-loaded)
 let _ourAirportsMap = null;      // ICAO -> name, null = not loaded
 let _ourAirportsList = null;     // [{icao, name, lat, lon, type, iata, city}] for nearby search
 let _ourAirportsLoading = false;
@@ -607,7 +607,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  // ── SandCat fuzzy search helpers (shared by SEARCH_AIRPORT & SEARCH_FIX) ──
+  // ── Fuzzy search helpers (shared by SEARCH_AIRPORT & SEARCH_FIX) ──
   function phoneticNormalize(s) {
     if (!s) return "";
     s = s.toUpperCase().replace(/[^A-Z]/g, "");
@@ -823,7 +823,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  // Search for fixes by ident — SandCat fuzzy search algorithm
+  // Search for fixes by ident — fuzzy search algorithm
   if (msg.type === "SEARCH_FIX") {
     const respond = () => {
       if (!READY) { sendResponse({ fixes: [] }); return; }
@@ -958,7 +958,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true;
     }
 
-    // THE SECRET OF SANDCAT:
+    // THE SECRET LOGIC:
     // We MUST use the callsign as the primary lookup, NOT the registration!
     // A physical aircraft (registration) flies 5-8 times a day. 500 rows = ~2.5 months of history.
     // A commercial flight number (callsign) flies 1-2 times a day. 500 rows = ~8+ months of history!
@@ -1073,12 +1073,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true; // async response
   }
 
-  // ── Origin/Destination Detection from GPS Track (Sandcat-style) ─────────────
+  // ── Origin/Destination Detection from GPS Track ─────────────
   // Unlike FlightAware scraping (limited to 3 months), this derives origin and
   // destination directly from the first and last GPS points of the flight track
   // by finding the nearest airport in the CIFP FIXES dataset.
   // This works for ANY flight regardless of age — no FlightAware account needed.
-  // GET_AIRPORT_NAME: resolve ICAO to full name via OurAirports (same source as Sandcat)
+  // GET_AIRPORT_NAME: resolve ICAO to full name via OurAirports
   if (msg.type === "GET_AIRPORT_NAME") {
     (async () => {
       await ensureOurAirportsLoaded();
@@ -1208,7 +1208,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       const first = pts[0];
       const last = pts[pts.length - 1];
-      const MAX_NM = 25; // same threshold as Sandcat
+      const MAX_NM = 25; // proximity threshold
 
       const originIcao = nearestAirportIcao(first.lat, first.lon, MAX_NM);
       const destIcao = nearestAirportIcao(last.lat, last.lon, MAX_NM);

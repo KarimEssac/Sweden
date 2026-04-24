@@ -767,7 +767,7 @@
               ctx.font = `bold ${fs}px monospace`;
               ctx.globalAlpha = Settings.opacity;
               ctx.lineWidth = 3 * dpr;
-              const labelColor = "#8000FF"; // User requested specific color for hover popup
+              const labelColor = "#FED8B1"; // User requested specific color for hover popup
               ctx.strokeStyle = isDarkColor(labelColor) ? "rgba(255,255,255,0.9)" : "rgba(0,0,0,0.9)";
               const label = highlightedNearby.name ? `${highlightedNearby.icao} (${highlightedNearby.name})` : highlightedNearby.icao;
               
@@ -1496,7 +1496,7 @@
   window.__wptOverlay = { getSettings: () => ({...Settings}), reload: loadFixesForView };
   logMsg("[WPT] Exposed window.__wptOverlay");
 
-  // ── SandCat fuzzy search engine (shared with background.js search) ─────────
+  // ── Fuzzy search engine ─────────
   const SOUND_GROUPS = [
     "EI","AE","OU","BP","DT","GKC","FV","SZC","MN","LR","JY","XKS"
   ];
@@ -3099,7 +3099,7 @@
       h += '<div class="sw-nearby-item" data-url="' + url + '" data-lat="' + a.lat + '" data-lon="' + a.lon + '" style="display:block;padding:8px 12px;border-bottom:1px solid #21262d;cursor:pointer;transition:background 0.1s;">'
         + '<div style="display:flex;align-items:baseline;justify-content:space-between;">'
         + '<div style="display:flex;align-items:baseline;gap:6px;min-width:0;flex:1;">'
-        + '<span class="sw-nearby-icao" data-icao="' + a.icao + '" data-name="' + (a.name || "").replace(/"/g, '&quot;') + '" style="color:#8000FF;font-weight:bold;font-size:13px;font-family:monospace;flex-shrink:0;">' + a.icao + '</span>'
+        + '<span class="sw-nearby-icao" data-icao="' + a.icao + '" data-name="' + (a.name || "").replace(/"/g, '&quot;') + '" style="color:#FED8B1;font-weight:bold;font-size:13px;font-family:monospace;flex-shrink:0;">' + a.icao + '</span>'
         + '<span style="color:#8b949e;font-size:10px;flex-shrink:0;">' + iataStr + '</span>'
         + '<span style="color:#c9d1d9;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + a.name + '</span>'
         + '</div>'
