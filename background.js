@@ -107,7 +107,7 @@ const DB_NAME = "AdsbWptCache";
 const STORE_NAME = "fixes";
 const MOAS_STORE = "moas";
 const FBOS_STORE = "fbos";
-const CACHE_VERSION = 19; // Bumped to force reload of cifp.zip with new waypoints/navaids (FULLCAPS)
+const CACHE_VERSION = 21; // Bumped to force reload of cifp.zip with corrected + new waypoints from waypoints_clean.csv
 
 function openDb() {
   return new Promise((resolve, reject) => {
