@@ -2238,17 +2238,16 @@
   let trackerRouteFirstPt = null;   // last drawn trail start point {lat, lon}
   let trackerRouteFetching = false; // true while fetch is in-flight
 
+  // Memory guard: idents that were ever crossed (<1 NM) are immortal — never evicted
+  const crossedIdents = new Set();
+
   function extractPlaneTrack() {
     if (typeof SelectedPlane === "undefined" || !SelectedPlane) return null;
     const pts = [];
 
     // Primary source: track_linesegs (the actual drawn flight path)
     if (Array.isArray(SelectedPlane.track_linesegs) && SelectedPlane.track_linesegs.length > 0) {
-      // Sort by segment timestamp (tar1090 exposes `ts` on each lineseg) so that
-      // pts[0] is always the chronologically earliest point (departure/origin) and
-      // pts[last] is the most recent point (approaching destination).
-      // Without this sort, the array order is indeterminate — OpenLayers may render
-      // segments newest-first, which inverts origin and destination in the GPS fallback.
+      // Sort by segment timestamp so pts[0] is the chronologically earliest point
       const sortedSegs = SelectedPlane.track_linesegs.slice().sort((a, b) => {
         const ta = (a.ts != null ? a.ts : (a.position_time != null ? a.position_time : 0));
         const tb = (b.ts != null ? b.ts : (b.position_time != null ? b.position_time : 0));
@@ -2261,28 +2260,35 @@
           const key = seg.position[0].toFixed(5) + "," + seg.position[1].toFixed(5);
           if (!seen.has(key)) {
             seen.add(key);
-            pts.push({ lat: seg.position[1], lon: seg.position[0] }); // [lon, lat] -> {lat, lon}
+            // FIX (Bug 2): include altitude and ground speed per point so that
+            // background.js can skip taxi/pushback points when detecting origin.
+            pts.push({
+              lat: seg.position[1],
+              lon: seg.position[0],
+              alt: seg.alt_baro != null ? seg.alt_baro : (seg.altitude != null ? seg.altitude : null),
+              gs:  seg.gs != null ? seg.gs : (seg.speed != null ? seg.speed : null)
+            });
           }
         }
       }
     }
 
-    // Add current position
+    // Add current position (no alt/gs filtering needed — it's the live location)
     if (SelectedPlane.position && Array.isArray(SelectedPlane.position) && SelectedPlane.position.length === 2) {
-      pts.push({ lat: SelectedPlane.position[1], lon: SelectedPlane.position[0] });
+      pts.push({
+        lat: SelectedPlane.position[1],
+        lon: SelectedPlane.position[0],
+        alt: SelectedPlane.alt_baro != null ? SelectedPlane.alt_baro : null,
+        gs:  SelectedPlane.gs != null ? SelectedPlane.gs : null
+      });
     }
 
-    // Extract callsign (e.g. "SWA123") — often padded with spaces
     const callsign = (SelectedPlane.flight || "").trim();
-    // Extract registration/tail number (e.g. "N7815L") to identify physical aircraft
     const registration = (SelectedPlane.registration || SelectedPlane.r || "").trim();
     
-    // The most accurate target time for flight snapping is the exact playback position time.
     let timestamp = (SelectedPlane.position_time || (Date.now() / 1000)) * 1000;
 
     // In historical playback, position_time may be frozen at the start/end of the track
-    // while the plane icon is visually moved by the scrubber.
-    // We can calculate the true scrubbed time by finding the track point closest to the rendered position.
     if (SelectedPlane.track && SelectedPlane.track.length > 0 && SelectedPlane.position) {
       const curLon = SelectedPlane.position[0];
       const curLat = SelectedPlane.position[1];
@@ -2299,12 +2305,11 @@
             const dst = Math.pow(ptLat - curLat, 2) + Math.pow(ptLon - curLon, 2);
             if (dst < minDst) {
               minDst = dst;
-              closestTime = ptTime * 1000; // tar1090 track timestamps are in seconds
+              closestTime = ptTime * 1000;
             }
           }
         }
         
-        // If we found a track point that perfectly matches the plane's icon location, use its time!
         if (minDst < 0.001) {
           timestamp = closestTime;
         }
@@ -2333,9 +2338,21 @@
     const callsign = trackData.callsign;
 
     // ── Async route lookup (non-blocking) ─────────────────────────────────
-    // Re-fetch only if the callsign changed OR the trail's starting point changed significantly (implying a new leg)
+    // Re-fetch when: (a) callsign changes, (b) trail start point moved significantly
+    // (plane landed and took off again), OR (c) the timestamp bucket changed
+    // (same airport round-trip — old code missed this because dist ≈ 0).
+    //
+    // FIX (Bug 5 — new-leg misses return trip):
+    // Old key: callsign + first-point coords. If a plane does LAX→LAS→LAX, the third
+    // leg starts back at LAX — identical coords to leg 1 — so distSq ≈ 0, threshold
+    // not triggered, stale LAS destination stays displayed.
+    // Fix: add a 10-minute timestamp bucket to the change key. When the plane lands,
+    // waits, and departs again, the timestamp will have advanced by at least one bucket,
+    // guaranteeing a re-fetch even when the physical origin is the same airport.
     let shouldFetch = false;
     const firstPt = pts.length > 0 ? pts[0] : null;
+    // 10-minute bucket: changes whenever the flight clock advances past a boundary
+    const tsBucket = Math.floor(trackData.timestamp / 600000);
 
     if (callsign && callsign !== trackerRouteCallsign) {
       shouldFetch = true;
@@ -2343,13 +2360,15 @@
       trackerRouteTimestamp = trackData.timestamp;
       trackerRouteFirstPt = firstPt;
     } else if (callsign && firstPt && trackerRouteFirstPt) {
-      // Calculate squared distance between new start point and cached start point
       const dLat = firstPt.lat - trackerRouteFirstPt.lat;
       const dLon = firstPt.lon - trackerRouteFirstPt.lon;
       const distSq = (dLat * dLat) + (dLon * dLon);
-      
-      // If the trail's physical start point moved by more than ~0.6 NM (0.01 degrees), the origin has changed!
-      if (distSq > 0.0001) {
+      // ~0.6 NM threshold — trail start moved to a different airport
+      const startMoved = distSq > 0.0001;
+      // Timestamp bucket changed — same airport but different departure time (return trip)
+      const bucketChanged = Math.floor(trackerRouteTimestamp / 600000) !== tsBucket;
+
+      if (startMoved || bucketChanged) {
         shouldFetch = true;
         trackerRouteTimestamp = trackData.timestamp;
         trackerRouteFirstPt = firstPt;
@@ -2521,6 +2540,25 @@
       else if (minDist <= 15.0) zones["15nm"].push(pt);
       else if (minDist <= 20.0) zones["20nm"].push(pt);
     }
+
+    // ── Memory guard ─────────────────────────────────────────────────────────
+    // 1. Permanently protect any fix that was ever in crossed (<1 NM),
+    //    <5 NM, or <10 NM zones from eviction
+    for (const pt of zones.crossed)  crossedIdents.add((pt.ident || "") + "|" + (pt.type || ""));
+    for (const pt of zones["5nm"])   crossedIdents.add((pt.ident || "") + "|" + (pt.type || ""));
+    for (const pt of zones["10nm"])  crossedIdents.add((pt.ident || "") + "|" + (pt.type || ""));
+
+    // 2. Evict stale fixes from allPoints that are too far from the current
+    //    aircraft position AND were never in a protected zone. This keeps
+    //    memory bounded on long flights without losing significant waypoints.
+    const EVICT_NM = 150;
+    const curPt = pts[pts.length - 1];
+    currentTrackerData.allPoints = currentTrackerData.allPoints.filter(pt => {
+      const key = (pt.ident || "") + "|" + (pt.type || "");
+      if (crossedIdents.has(key)) return true; // always keep crossed fixes
+      const distFromPlane = haversineDistance(curPt.lat, curPt.lon, pt.lat, pt.lon);
+      return distFromPlane <= EVICT_NM;
+    });
 
     // Deduplicate by ident within each category (keep highest nearestSegIdx = most recently visited)
     for (const k in zones) {
@@ -2825,6 +2863,20 @@
     var r = trackerRouteInfo;
     var h = '';
 
+    function airportUrl(icao) {
+      if (!icao) return '#';
+      var p = icao.trim().toUpperCase().charAt(0);
+      return (p === 'E' || p === 'L' || p === 'B' || p === 'U')
+        ? 'https://www.liveatc.net/search/?icao=' + icao.trim().toUpperCase()
+        : 'https://www.airnav.com/airport/' + icao.trim().toUpperCase();
+    }
+    function airportUrlLabel(icao) {
+      if (!icao) return 'Open';
+      var p = icao.trim().toUpperCase().charAt(0);
+      return (p === 'E' || p === 'L' || p === 'B' || p === 'U') ? 'Open on LiveATC' : 'Open on AirNav';
+    }
+
+
     // Airline / callsign row
     if (r.airline && r.airline.name) {
       var airlineRadio = r.airline.callsign ? ' (' + r.airline.callsign + ')' : '';
@@ -2840,30 +2892,38 @@
         + '</div>';
     }
 
-    // Origin → Destination row
-    if (r.origin && r.destination) {
+    // Origin → Destination row (always shown when we have at least origin)
+    if (r.origin) {
       var oIcao = r.origin.icao || '????';
       var oIata = r.origin.iata ? ' (' + r.origin.iata + ')' : '';
-      var dIcao = r.destination.icao || '????';
-      var dIata = r.destination.iata ? ' (' + r.destination.iata + ')' : '';
-      var oCity = r.origin.city || r.origin.name || '';
-      var dCity = r.destination.city || r.destination.name || '';
-
-      var oAirnavUrl = 'https://www.airnav.com/airport/' + oIcao;
-      var dAirnavUrl = 'https://www.airnav.com/airport/' + dIcao;
+      var oUrl = airportUrl(oIcao);
+      var oUrlLabel = airportUrlLabel(oIcao);
       var oName = r.origin.name || '';
-      var dName = r.destination.name || '';
+
+      var destBlock;
+      if (r.destination && r.destination.icao) {
+        var dIcao = r.destination.icao;
+        var dIata = r.destination.iata ? ' (' + r.destination.iata + ')' : '';
+        var dUrl = airportUrl(dIcao);
+        var dUrlLabel = airportUrlLabel(dIcao);
+        var dName = r.destination.name || '';
+        destBlock = '<a href="' + dUrl + '" target="_blank" rel="noopener" style="color:#f85149;font-weight:bold;font-size:14px;font-family:monospace;text-decoration:none;border-bottom:1px dashed #f8514966;" title="' + dUrlLabel + '">' + dIcao + '<span style="color:#8b949e;font-size:10px;font-weight:normal;">' + dIata + '</span></a>'
+          + '<span style="color:#c9d1d9;font-size:11px;margin-top:3px;text-align:center;white-space:normal;word-break:break-word;max-width:130px;line-height:1.3;">' + (dName || '<span style="color:#484f58;font-style:italic;">name unavailable</span>') + '</span>';
+      } else {
+        destBlock = '<span style="color:#484f58;font-weight:bold;font-size:13px;font-family:monospace;letter-spacing:0.5px;">No data</span>'
+          + '<span style="color:#484f58;font-size:10px;margin-top:3px;font-style:italic;">destination unknown</span>';
+      }
+
       h += '<div style="padding:2px 14px 6px;display:flex;align-items:flex-start;gap:6px;">'
         + '<div style="display:flex;flex-direction:column;align-items:center;min-width:0;flex:1;">'
-        + '<a href="' + oAirnavUrl + '" target="_blank" rel="noopener" style="color:#3fb950;font-weight:bold;font-size:14px;font-family:monospace;text-decoration:none;border-bottom:1px dashed #3fb95066;" title="Open on AirNav">' + oIcao + '<span style="color:#8b949e;font-size:10px;font-weight:normal;">' + oIata + '</span></a>'
+        + '<a href="' + oUrl + '" target="_blank" rel="noopener" style="color:#3fb950;font-weight:bold;font-size:14px;font-family:monospace;text-decoration:none;border-bottom:1px dashed #3fb95066;" title="' + oUrlLabel + '">' + oIcao + '<span style="color:#8b949e;font-size:10px;font-weight:normal;">' + oIata + '</span></a>'
         + '<span style="color:#c9d1d9;font-size:11px;margin-top:3px;text-align:center;white-space:normal;word-break:break-word;max-width:130px;line-height:1.3;">' + (oName || '<span style="color:#484f58;font-style:italic;">name unavailable</span>') + '</span>'
         + '</div>'
         + '<div style="display:flex;flex-direction:column;align-items:center;flex-shrink:0;padding-top:2px;">'
         + '<span style="color:#58a6ff;font-size:14px;letter-spacing:2px;">──▶</span>'
         + '</div>'
         + '<div style="display:flex;flex-direction:column;align-items:center;min-width:0;flex:1;">'
-        + '<a href="' + dAirnavUrl + '" target="_blank" rel="noopener" style="color:#f85149;font-weight:bold;font-size:14px;font-family:monospace;text-decoration:none;border-bottom:1px dashed #f8514966;" title="Open on AirNav">' + dIcao + '<span style="color:#8b949e;font-size:10px;font-weight:normal;">' + dIata + '</span></a>'
-        + '<span style="color:#c9d1d9;font-size:11px;margin-top:3px;text-align:center;white-space:normal;word-break:break-word;max-width:130px;line-height:1.3;">' + (dName || '<span style="color:#484f58;font-style:italic;">name unavailable</span>') + '</span>'
+        + destBlock
         + '</div>'
         + '</div>';
     }
@@ -2933,7 +2993,7 @@
       + '</div>'
       + '<div style="padding:8px 12px;border-bottom:1px solid #30363d;">'
       + '<input type="text" id="sweden-nearby-search" placeholder="Search airports..." style="width:100%;box-sizing:border-box;background:#161b22;border:1px solid #30363d;color:#c9d1d9;padding:6px 10px;border-radius:4px;outline:none;font-size:12px;font-family:monospace;" />'
-      + '<div style="font-size:10px;color:#484f58;margin-top:5px;text-align:center;">🖱 Left-click: pan camera &nbsp;·&nbsp; Right-click: open AirNav</div>'
+      + '<div style="font-size:10px;color:#484f58;margin-top:5px;text-align:center;">🖱 Left-click: pan camera &nbsp;·&nbsp; Right-click: open AirNav / LiveATC</div>'
       + '</div>'
       + '<div id="sweden-nearby-list" style="flex:1;overflow-y:auto;background:#0d1117;"></div>';
 
@@ -3095,7 +3155,10 @@
       var typeLabel = a.type === 'large_airport' ? 'LRG' : a.type === 'medium_airport' ? 'MED' : 'SML';
       var typeColor = a.type === 'large_airport' ? '#58a6ff' : a.type === 'medium_airport' ? '#3fb950' : '#8b949e';
       var iataStr = a.iata ? ' (' + a.iata + ')' : '';
-      var url = 'https://www.airnav.com/airport/' + a.icao;
+      var _p = (a.icao || '').trim().toUpperCase().charAt(0);
+      var url = (_p === 'E' || _p === 'L' || _p === 'B' || _p === 'U')
+        ? 'https://www.liveatc.net/search/?icao=' + (a.icao || '').trim().toUpperCase()
+        : 'https://www.airnav.com/airport/' + a.icao;
       h += '<div class="sw-nearby-item" data-url="' + url + '" data-lat="' + a.lat + '" data-lon="' + a.lon + '" style="display:block;padding:8px 12px;border-bottom:1px solid #21262d;cursor:pointer;transition:background 0.1s;">'
         + '<div style="display:flex;align-items:baseline;justify-content:space-between;">'
         + '<div style="display:flex;align-items:baseline;gap:6px;min-width:0;flex:1;">'
@@ -3191,6 +3254,7 @@
     trackerRouteInfo = null;
     trackerRouteCallsign = "";
     trackerRouteFetching = false;
+    crossedIdents.clear();
 
     // First load + interval
     updateTrackerData();

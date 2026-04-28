@@ -107,7 +107,7 @@ const DB_NAME = "AdsbWptCache";
 const STORE_NAME = "fixes";
 const MOAS_STORE = "moas";
 const FBOS_STORE = "fbos";
-const CACHE_VERSION = 23; // Bumped to force reload of cifp.zip with newly added waypoints (LIKIQ, ALPOZ, WATQO, EKMEP)
+const CACHE_VERSION = 24; // Bumped to force reload of cifp.zip with newly added Ireland/Netherlands waypoints
 
 function openDb() {
   return new Promise((resolve, reject) => {
@@ -1003,35 +1003,43 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
 
         // ── GPS-Origin Hybrid Filter ─────────────────────────────────────────
-        // If gpsOrigin was provided (from ADS-B trail first point), ONLY consider
-        // FlightAware routes that depart from that exact airport.
-        // This is the killer feature: the trail physically starts at the real origin,
-        // so we use it to instantly disambiguate multi-leg flights.
-        const gpsOrigin = (msg.gpsOrigin || "").toUpperCase();
+        // FIX (Bug 3 — ICAO/IATA mismatch):
+        // GPS detection returns 4-letter ICAO (e.g. "KLAX") but FlightAware history URLs
+        // use either 4-letter ICAO ("KLAX") or 3-letter IATA ("LAX"). The old strict
+        // equality r.orig === gpsOrigin always failed for 3-letter URLs.
+        // We now normalise both sides by stripping the leading region prefix from
+        // 4-letter codes (K=USA, C=Canada, E=Europe, Y=Australia, L=S.Europe) and
+        // comparing the 3-letter cores, matching both "KLAX" and "LAX" cases.
+        function normAirportCode(code) {
+          if (!code) return '';
+          const c = code.trim().toUpperCase();
+          if (c.length === 4 && /^[KCEPYL]/.test(c)) return c.slice(1);
+          return c;
+        }
+        const gpsOrigin = (msg.gpsOrigin || '').toUpperCase();
+        const gpsOriginNorm = normAirportCode(gpsOrigin);
         let candidateRoutes;
-        if (gpsOrigin) {
-          // Filter to only flights departing from the GPS-detected origin
-          candidateRoutes = allRoutes.filter(r => r.orig === gpsOrigin);
+        if (gpsOriginNorm) {
+          candidateRoutes = allRoutes.filter(r => normAirportCode(r.orig) === gpsOriginNorm);
           // If no flights match the GPS origin (e.g., small uncharted airport), fall back to all routes
           if (candidateRoutes.length === 0) candidateRoutes = allRoutes;
         } else {
           candidateRoutes = allRoutes;
         }
 
+        // FIX (Bug 4 — future flight wins):
+        // Old code only penalised flights >1 h in the future, creating a 0–60 min window
+        // where a not-yet-departed flight would beat an actual past departure.
+        // New rule: ANY flight whose scheduled departure is in the future gets a flat
+        // 24-hour penalty, so the most-recent past departure always wins.
         for (const route of candidateRoutes) {
           let diff;
           if (route.ts > targetTime) {
-            const futureMs = route.ts - targetTime;
-            if (futureMs > 3600000) {
-              diff = futureMs + 21600000; 
-            } else {
-              diff = futureMs;
-            }
+            diff = (route.ts - targetTime) + 86400000; // +24 h penalty for future flights
           } else {
             diff = targetTime - route.ts;
           }
-          
-          if (diff <= bestDiff) {
+          if (diff < bestDiff) {
             bestDiff = diff;
             bestRoute = { ...route, diff };
           }
@@ -1163,16 +1171,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "DETECT_ORIGIN_DEST_FROM_TRACK") {
-    const respond = () => {
+    // FIX (Bug 1 — wrong airport position):
+    // Old code used the FIXES array (CIFP procedure waypoints). Each airport was represented
+    // by whichever procedure fix happened to appear first in the CIFP file — which is often
+    // a fix on a SID/STAR that is several NM away from the actual runway threshold.
+    // This caused the nearest-airport search to pick the wrong airport when two airports
+    // are close together (e.g. KBUR vs KLAX — a SID fix for one could be closer to the
+    // other airport's actual coordinates).
+    //
+    // Fix: use _ourAirportsList, which contains the true lat/lon of each airport
+    // from OurAirports (airports.csv). This is the same dataset used by GET_NEARBY_AIRPORTS
+    // and gives correct positions for every large/medium/small airport in the world.
+    const respond = async () => {
+      await ensureOurAirportsLoaded();
       const pts = msg.points;
-      if (!Array.isArray(pts) || pts.length < 2) {
+      if (!Array.isArray(pts) || pts.length < 2 || !_ourAirportsList || !_ourAirportsList.length) {
         sendResponse({ origin: null, destination: null });
         return;
       }
 
-      // Haversine distance in nautical miles
       function haversineNm(lat1, lon1, lat2, lon2) {
-        const R = 3440.065; // Earth radius in NM
+        const R = 3440.065;
         const dLat = (lat2 - lat1) * Math.PI / 180;
         const dLon = (lon2 - lon1) * Math.PI / 180;
         const a = Math.sin(dLat / 2) ** 2 +
@@ -1181,53 +1200,57 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
       }
 
-      // Find nearest airport ICAO to a lat/lon point within maxNm nautical miles.
-      // Uses the FIXES array which has type="airport" entries; each airport-type
-      // fix carries the ICAO code in its `airport` field.
-      function nearestAirportIcao(lat, lon, maxNm) {
-        // Collect all unique airport ICAO positions from FIXES
-        // (multiple procedure fixes share the same airport ICAO, pick closest)
-        const seen = new Map(); // icao -> {lat, lon}
-        for (const f of FIXES) {
-          if (f.type === "airport" && f.airport && !seen.has(f.airport)) {
-            seen.set(f.airport, { lat: f.lat, lon: f.lon });
-          }
-        }
-
+      // Find nearest airport from OurAirports list (real coordinates, not CIFP procedure fixes).
+      // Returns { icao, iata } or null if nothing is within maxNm.
+      function nearestAirport(lat, lon, maxNm) {
         let best = null;
         let bestDist = Infinity;
-        for (const [icao, pos] of seen) {
-          const d = haversineNm(lat, lon, pos.lat, pos.lon);
+        for (const apt of _ourAirportsList) {
+          const d = haversineNm(lat, lon, apt.lat, apt.lon);
           if (d < bestDist) {
             bestDist = d;
-            best = icao;
+            best = apt;
           }
         }
-        return (bestDist <= maxNm) ? best : null;
+        if (!best || bestDist > maxNm) return null;
+        return { icao: best.icao, iata: best.iata || null };
       }
 
-      const first = pts[0];
-      const last = pts[pts.length - 1];
-      const MAX_NM = 25; // proximity threshold
+      // FIX (Bug 2 — first point includes taxi):
+      // Old code used pts[0] — the very first lineseg position — which can be a taxi
+      // or pushback position far from the runway, causing a wrong nearest-airport match
+      // at busy multi-airport areas (e.g. SFO vs OAK vs SJC).
+      //
+      // Fix: scan the track looking for the first point where altitude > 500 ft AND
+      // ground speed > 60 kt. That point is reliably airborne and still close to the
+      // departure airport. We pass altitudes and speeds as optional extra fields in the
+      // points array (see content_main.js). If no alt/speed data is present we fall back
+      // to pts[0] as before, so this is fully backward-compatible.
+      function findTakeoffPoint(pts) {
+        // Try to find the first clearly-airborne point
+        for (const p of pts) {
+          if (p.alt != null && p.gs != null) {
+            if (p.alt > 500 && p.gs > 60) return p;
+          }
+        }
+        // No alt/speed data available — fall back to first point
+        return pts[0];
+      }
 
-      const originIcao = nearestAirportIcao(first.lat, first.lon, MAX_NM);
-      const destIcao = nearestAirportIcao(last.lat, last.lon, MAX_NM);
+      const originPt = findTakeoffPoint(pts);
+      const lastPt = pts[pts.length - 1];
+      const MAX_NM = 30; // slightly wider than old 25 NM to catch large airport complexes
+
+      const originInfo = nearestAirport(originPt.lat, originPt.lon, MAX_NM);
+      const destInfo = nearestAirport(lastPt.lat, lastPt.lon, MAX_NM);
 
       sendResponse({
-        origin: originIcao ? { icao: originIcao, iata: null, name: null, city: null } : null,
-        destination: destIcao ? { icao: destIcao, iata: null, name: null, city: null } : null
+        origin: originInfo ? { icao: originInfo.icao, iata: originInfo.iata, name: null, city: null } : null,
+        destination: destInfo ? { icao: destInfo.icao, iata: destInfo.iata, name: null, city: null } : null
       });
     };
 
-    // FIXES may still be loading — wait for them just like GET_FIXES_IN_BBOX does
-    if (!READY && !LOADING) {
-      loadCifp().then(respond);
-    } else if (LOADING) {
-      const wait = () => { if (READY) { respond(); return; } setTimeout(wait, 500); };
-      wait();
-    } else {
-      respond();
-    }
+    respond().catch(() => sendResponse({ origin: null, destination: null }));
     return true;
   }
 
