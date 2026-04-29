@@ -107,7 +107,7 @@ const DB_NAME = "AdsbWptCache";
 const STORE_NAME = "fixes";
 const MOAS_STORE = "moas";
 const FBOS_STORE = "fbos";
-const CACHE_VERSION = 24; // Bumped to force reload of cifp.zip with newly added Ireland/Netherlands waypoints
+const CACHE_VERSION = 25; // Bumped to force reload of cifp.zip with newly added French waypoints
 
 function openDb() {
   return new Promise((resolve, reject) => {
