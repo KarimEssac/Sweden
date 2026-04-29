@@ -102,12 +102,51 @@ async function ensureOurAirportsLoaded() {
   _ourAirportsWaiters = [];
 }
 
+// ─── GitHub raw CSV sources (supplemental waypoints + navaids) ───────────────
+const GITHUB_RAW_BASE    = "https://raw.githubusercontent.com/KarimEssac/Sweden/main";
+const WAYPOINTS_CSV_URL  = `${GITHUB_RAW_BASE}/waypoints.csv`;
+const NAVAIDS_CSV_URL    = `${GITHUB_RAW_BASE}/navaids.csv`;
+const DATA_VERSION_URL   = `${GITHUB_RAW_BASE}/data_version.json`;
+
+// ─── Remote data version helpers ─────────────────────────────────────────────
+// The extension fetches data_version.json on every startup (it's ~15 bytes).
+// If its "v" differs from what's stored locally, the IndexedDB cache is
+// automatically busted and all CSVs are re-fetched — no extension republish needed.
+const DATA_VERSION_KEY = "cifp_data_version";
+
+function getStoredDataVersion() {
+  return new Promise(resolve =>
+    chrome.storage.local.get([DATA_VERSION_KEY], d => resolve(d[DATA_VERSION_KEY] ?? null))
+  );
+}
+
+function saveDataVersion(v) {
+  return new Promise(resolve =>
+    chrome.storage.local.set({ [DATA_VERSION_KEY]: v }, resolve)
+  );
+}
+
+async function fetchRemoteDataVersion() {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000); // 5 s timeout
+    const res = await fetch(DATA_VERSION_URL, { signal: ctrl.signal, cache: "no-cache" });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const json = await res.json();
+    return json.v ?? null;
+  } catch (_) {
+    return null; // GitHub unreachable — fall back to cached data
+  }
+}
+
 // ─── IndexedDB caching ────────────────────────────────────────────────────────
 const DB_NAME = "AdsbWptCache";
 const STORE_NAME = "fixes";
 const MOAS_STORE = "moas";
 const FBOS_STORE = "fbos";
-const CACHE_VERSION = 25; // Bumped to force reload of cifp.zip with newly added French waypoints
+const CACHE_VERSION = 26; // Nuclear option — only bump for CIFP binary/schema changes.
+                          // For CSV data updates, edit data_version.json instead.
 
 function openDb() {
   return new Promise((resolve, reject) => {
@@ -252,25 +291,38 @@ function lineType(line) {
   return "fix";
 }
 
-// ─── Main CIFP loader ─────────────────────────────────────────────────────────
+// --- Main CIFP loader -----------------------------------------------------------
 async function loadCifp() {
   if (READY || LOADING) return;
   LOADING = true;
 
   try {
-    // 1. Try loading from IndexedDB cache first (fast path for SW restarts)
-    /* console.log("[WPT] Checking IndexedDB cache..."); */
-    const cached = await loadFixesFromCache();
-    if (cached && cached.length > 0) {
-      FIXES = cached;
-      READY = true;
-      LOADING = false;
-      /* console.log(`[WPT] Loaded ${FIXES.length} fixes from cache`); */
-      return;
+    // 1. Check remote data_version.json to decide if IndexedDB cache is still valid.
+    //    This is a ~15-byte fetch; if GitHub is unreachable it returns null and we
+    //    fall back to the existing cache without re-parsing anything.
+    const remoteV = await fetchRemoteDataVersion();
+    const storedV = await getStoredDataVersion();
+    const cacheIsValid = remoteV === null || remoteV === storedV;
+
+    /* console.log(`[WPT] data_version: remote=${remoteV} stored=${storedV} valid=${cacheIsValid}`); */
+
+    // 2. Fast path: load from IndexedDB if cache is still valid
+    if (cacheIsValid) {
+      /* console.log("[WPT] Checking IndexedDB cache..."); */
+      const cached = await loadFixesFromCache();
+      if (cached && cached.length > 0) {
+        FIXES = cached;
+        READY = true;
+        LOADING = false;
+        /* console.log(`[WPT] Loaded ${FIXES.length} fixes from cache`); */
+        return;
+      }
+    } else {
+      /* console.log("[WPT] data_version changed — busting IndexedDB cache"); */
     }
 
-    // 2. Parse from cifp.zip
-    /* console.log("[WPT] No cache found, loading cifp.zip..."); */
+    // 3. Parse FAACIFP binary from local cifp.zip
+    /* console.log([WPT] No cache found, loading cifp.zip...); */
     const url = chrome.runtime.getURL("cifp.zip");
     const res = await fetch(url);
     if (!res.ok) throw new Error("fetch failed: " + res.status);
@@ -280,8 +332,8 @@ async function loadCifp() {
     const files = unzipRawFiles(u8);
 
     // Find the CIFP file inside the zip (avoid PDFs/TXTs/XLSXs)
-    const cifpName = Object.keys(files).find(k => 
-      /FAACIFP/i.test(k) && !/\.(pdf|txt|xlsx|doc)$/i.test(k)
+    const cifpName = Object.keys(files).find(k =>
+      /FAACIFP/i.test(k) && !/(\.pdf|\.txt|\.xlsx|\.doc)$/i.test(k)
     );
     if (!cifpName) throw new Error("No CIFP file found in zip");
 
@@ -291,63 +343,85 @@ async function loadCifp() {
 
     parseCifp(text);
 
-    // Also parse navaids.csv if present
-    const navaidsName = Object.keys(files).find(k => /navaids\.csv/i.test(k));
-    if (navaidsName) {
-      const csv = new TextDecoder("utf-8").decode(files[navaidsName]);
-      const lines = csv.split(/\r?\n/);
+    // ── navaids.csv: GitHub first, local cifp.zip fallback ───────────────────
+    // Fetch both in parallel; if either fails we fall back to the bundled copy.
+    const [navaidsResp, waypointsResp] = await Promise.allSettled([
+      fetch(NAVAIDS_CSV_URL),
+      fetch(WAYPOINTS_CSV_URL)
+    ]);
+
+    let navaidsCsv = null;
+    if (navaidsResp.status === "fulfilled" && navaidsResp.value.ok) {
+      navaidsCsv = await navaidsResp.value.text();
+    } else {
+      // GitHub unreachable — fall back to the copy bundled in cifp.zip
+      const localName = Object.keys(files).find(k => /navaids\.csv/i.test(k));
+      if (localName) navaidsCsv = new TextDecoder("utf-8").decode(files[localName]);
+    }
+
+    if (navaidsCsv) {
+      const lines = navaidsCsv.split(/\r?\n/);
       for (let i = 1; i < lines.length; i++) {
         if (!lines[i].trim()) continue;
         const cols = lines[i].split(",");
         if (cols.length >= 5) {
-          const ident = cols[0].trim().toUpperCase();
-          const name = cols[1].trim().toUpperCase();
-          let typeRaw = cols[2].trim().toUpperCase();
-          const lat = parseFloat(cols[3]);
-          const lon = parseFloat(cols[4]);
-          
+          const ident   = cols[0].trim().toUpperCase();
+          const name    = cols[1].trim().toUpperCase();
+          let typeRaw   = cols[2].trim().toUpperCase();
+          const lat     = parseFloat(cols[3]);
+          const lon     = parseFloat(cols[4]);
+
           let type = "ndb";
           if (typeRaw.includes("VOR") || typeRaw.includes("TACAN")) type = "vor";
 
           if (!isNaN(lat) && !isNaN(lon)) {
-             FIXES.push({ ident, lat, lon, type, name });
+            FIXES.push({ ident, lat, lon, type, name });
           }
         }
       }
     }
 
-    // Also parse waypoints.csv if present
-    const waypointsName = Object.keys(files).find(k => /waypoints\.csv/i.test(k));
-    if (waypointsName) {
-      const csv = new TextDecoder("utf-8").decode(files[waypointsName]);
-      const lines = csv.split(/\r?\n/);
+    // ── waypoints.csv: GitHub first, local cifp.zip fallback ─────────────────
+    let waypointsCsv = null;
+    if (waypointsResp.status === "fulfilled" && waypointsResp.value.ok) {
+      waypointsCsv = await waypointsResp.value.text();
+    } else {
+      // GitHub unreachable — fall back to the copy bundled in cifp.zip
+      const localName = Object.keys(files).find(k => /waypoints\.csv/i.test(k));
+      if (localName) waypointsCsv = new TextDecoder("utf-8").decode(files[localName]);
+    }
+
+    if (waypointsCsv) {
+      const lines = waypointsCsv.split(/\r?\n/);
       for (let i = 1; i < lines.length; i++) {
         if (!lines[i].trim()) continue;
         // Regex split handles commas inside quotes
         const split = lines[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/);
         if (split.length >= 5) {
-           const ident = split[2].replace(/"/g, "").trim().toUpperCase();
-           const latStr = split[3].replace(/"/g, "").trim();
-           const lonStr = split[4].replace(/"/g, "").trim();
-           
-           const mLat = latStr.match(/(\d+)[^\d]+(\d+)[^\d]+([\d.]+)[^\dNSWE]*([NSWE])/i);
-           const mLon = lonStr.match(/(\d+)[^\d]+(\d+)[^\d]+([\d.]+)[^\dNSWE]*([NSWE])/i);
-           
-           if (mLat && mLon) {
-             let lat = parseFloat(mLat[1]) + parseFloat(mLat[2])/60 + parseFloat(mLat[3])/3600;
-             if (mLat[4].toUpperCase() === 'S') lat = -lat;
-             let lon = parseFloat(mLon[1]) + parseFloat(mLon[2])/60 + parseFloat(mLon[3])/3600;
-             if (mLon[4].toUpperCase() === 'W') lon = -lon;
-             
-             FIXES.push({ ident, lat, lon, type: "fix" });
-           }
+          const ident  = split[2].replace(/"/g, "").trim().toUpperCase();
+          const latStr = split[3].replace(/"/g, "").trim();
+          const lonStr = split[4].replace(/"/g, "").trim();
+
+          const mLat = latStr.match(/(\d+)[^\d]+(\d+)[^\d]+([\d.]+)[^\dNSWE]*([NSWE])/i);
+          const mLon = lonStr.match(/(\d+)[^\d]+(\d+)[^\d]+([\d.]+)[^\dNSWE]*([NSWE])/i);
+
+          if (mLat && mLon) {
+            let lat = parseFloat(mLat[1]) + parseFloat(mLat[2])/60 + parseFloat(mLat[3])/3600;
+            if (mLat[4].toUpperCase() === 'S') lat = -lat;
+            let lon = parseFloat(mLon[1]) + parseFloat(mLon[2])/60 + parseFloat(mLon[3])/3600;
+            if (mLon[4].toUpperCase() === 'W') lon = -lon;
+
+            FIXES.push({ ident, lat, lon, type: "fix" });
+          }
         }
       }
     }
 
-    // 3. Cache parsed fixes to IndexedDB
+    // 4. Cache parsed fixes to IndexedDB and persist the remote version so the
+    //    cache is considered valid on the next startup unless v changes again.
     /* console.log("[WPT] Saving to IndexedDB cache..."); */
     await saveFixes(FIXES);
+    if (remoteV !== null) await saveDataVersion(remoteV);
     /* console.log("[WPT] Cache saved successfully"); */
 
   } catch (e) {
