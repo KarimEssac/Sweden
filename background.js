@@ -495,15 +495,17 @@ async function loadCifp() {
       const lines = vfrCsv.split(/\r?\n/);
       for (let i = 1; i < lines.length; i++) {
         if (!lines[i].trim()) continue;
-        const cols = lines[i].split(",");
+        const cols = lines[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(c => c.replace(/^"|"$/g, "").replace(/""/g, '"'));
         if (cols.length >= 5) {
           const ident   = cols[0].trim().toUpperCase();
           const name    = cols[1].trim().toUpperCase();
           const lat     = parseFloat(cols[3]);
           const lon     = parseFloat(cols[4]);
+          const airportRaw = cols.length >= 7 ? cols[6].trim() : "";
+          const airport = airportRaw ? airportRaw.toUpperCase() : undefined;
 
           if (!isNaN(lat) && !isNaN(lon)) {
-            FIXES.push({ ident, lat, lon, type: "vfr", name });
+            FIXES.push({ ident, lat, lon, type: "vfr", name, airport });
           }
         }
       }
