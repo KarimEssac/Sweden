@@ -435,7 +435,7 @@ function getProcCopyText(fix) {
   const map = {'0':'ZERO','1':'ONE','2':'TWO','3':'THREE','4':'FOUR','5':'FIVE','6':'SIX','7':'SEVEN','8':'EIGHT','9':'NINE'};
   const numWords = num.split('').map(c => map[c] || c).join('');
   const displayName = fix.name ? fix.name.toUpperCase() : fix.ident.toUpperCase();
-  return `${displayName} ${numWords} ${p.type === 'SID' ? 'DEPARTURE' : 'ARRIVAL'}`;
+  return `${displayName} ${numWords}`;
 }
 
 function renderResults(fixes) {

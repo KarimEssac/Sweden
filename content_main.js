@@ -293,8 +293,7 @@
   }
 
   // Convert a proc variant suffix to ATC readback (e.g., "1D" -> "ONE DELTA")
-  // Optional chartSuffix appends the chart name suffix (e.g., "DEPARTURE", "ARRIVAL")
-  function procVariantReadback(procName, chartSuffix) {
+  function procVariantReadback(procName) {
     const map = {'0':'ZERO','1':'ONE','2':'TWO','3':'THREE','4':'FOUR','5':'FIVE','6':'SIX','7':'SEVEN','8':'EIGHT','9':'NINE'};
     const nato = {'A':'ALFA','B':'BRAVO','C':'CHARLIE','D':'DELTA','E':'ECHO','F':'FOXTROT','G':'GOLF','H':'HOTEL',
       'J':'JULIETT','K':'KILO','L':'LIMA','M':'MIKE','N':'NOVEMBER','P':'PAPA','Q':'QUEBEC','R':'ROMEO',
@@ -305,9 +304,7 @@
     const ident = parts[0].toUpperCase();
     const variantPart = parts.slice(1).join(' ').toUpperCase();
     const words = variantPart.split('').map(c => map[c] || nato[c] || c).join(' ');
-    let result = `${ident} ${words}`;
-    if (chartSuffix) result += ` ${chartSuffix}`;
-    return result;
+    return `${ident} ${words}`;
   }
 
   // Check if fix has charted procedure variants (enriched CSV data)
@@ -371,20 +368,18 @@
     const stars = rootProcs.filter(p => p.type === 'STAR');
     if (sids.length > 0) {
       for (const s of sids) {
-        const readback = procVariantReadback(s.proc, s.suffix);
+        const readback = procVariantReadback(s.proc);
         const sidColor = isWaypoint ? '#ff9e22' : headerColor;
-        const sfxTag = s.suffix === 'DEPARTURE' ? ' <span style="font-size:9px;opacity:0.6;margin-left:3px">DEP</span>' : '';
         h += `<div class="wpt-var-item" data-copy="${readback}" style="padding:6px 12px;cursor:pointer;color:${sidColor};border-bottom:1px solid #161b22;transition:background 0.1s;">`
-          + `${s.proc}${sfxTag}</div>`;
+          + `${s.proc}</div>`;
       }
     }
     if (stars.length > 0) {
       for (const s of stars) {
-        const readback = procVariantReadback(s.proc, s.suffix);
+        const readback = procVariantReadback(s.proc);
         const starColor = isWaypoint ? '#00cfcf' : headerColor;
-        const sfxTag = s.suffix === 'ARRIVAL' ? ' <span style="font-size:9px;opacity:0.6;margin-left:3px">ARR</span>' : '';
         h += `<div class="wpt-var-item" data-copy="${readback}" style="padding:6px 12px;cursor:pointer;color:${starColor};border-bottom:1px solid #161b22;transition:background 0.1s;">`
-          + `${s.proc}${sfxTag}</div>`;
+          + `${s.proc}</div>`;
       }
     }
 
@@ -427,14 +422,14 @@
     if (p.csvProc && hasMultipleVariants(fix)) return null;
     if (p.csvProc) {
       // Single variant CSV proc — copy readback
-      return procVariantReadback(p.proc, p.suffix);
+      return procVariantReadback(p.proc);
     }
-    // CIFP (US) procs — keep existing behavior with DEPARTURE/ARRIVAL
+    // CIFP (US) procs
     const num = p.proc.replace(fix.ident, '').trim();
     const map = {'0':'ZERO','1':'ONE','2':'TWO','3':'THREE','4':'FOUR','5':'FIVE','6':'SIX','7':'SEVEN','8':'EIGHT','9':'NINE'};
     const numWords = num.split('').map(c => map[c] || c).join('');
     const displayName = fix.name ? fix.name.toUpperCase() : fix.ident.toUpperCase();
-    return `${displayName} ${numWords} ${p.type === 'SID' ? 'DEPARTURE' : 'ARRIVAL'}`;
+    return `${displayName} ${numWords}`;
   }
   // If a hex color is too dark, return white for readability on dark tooltips
   function readableColor(hex) {
@@ -2958,7 +2953,7 @@
     // Store variant proc data for Ctrl popup
     let varAttr = '';
     if (multiVar) {
-      const varData = rootProcs.map(p => ({ proc: p.proc, type: p.type, suffix: p.suffix }));
+      const varData = rootProcs.map(p => ({ proc: p.proc, type: p.type }));
       varAttr = ' data-variants="' + JSON.stringify(varData).replace(/"/g, '&quot;') + '"';
     }
     let h = '<div class="tracker-item" data-color="' + col + '" data-cp="' + copyVal.replace(/"/g, "&quot;") + '" data-type="' + pt.type + '" data-ident="' + (pt.ident || "").toUpperCase().replace(/"/g, "&quot;") + '"' + latAttr + lonAttr + varAttr + ' style="padding:6px 12px;border-bottom:1px solid #21262d;cursor:pointer;">';
@@ -2998,7 +2993,7 @@
         var screenCenter = window.innerWidth / 2;
         // Build a fake fix for openVariantsPopup
         var fixType = _trackerHoveredRow.getAttribute('data-type') || 'fix';
-        var fakeFix = { ident: ident, type: fixType, procs: varData.map(function(v) { return { proc: v.proc, type: v.type, csvProc: true, suffix: v.suffix }; }) };
+        var fakeFix = { ident: ident, type: fixType, procs: varData.map(function(v) { return { proc: v.proc, type: v.type, csvProc: true }; }) };
         if (panelCenter > screenCenter) {
           openVariantsPopup(fakeFix, rect.left - 4, rect.top);
           if (_variantsPopup) {

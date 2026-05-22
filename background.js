@@ -162,7 +162,7 @@ const DB_NAME = "AdsbWptCache";
 const STORE_NAME = "fixes";
 const MOAS_STORE = "moas";
 const FBOS_STORE = "fbos";
-const CACHE_VERSION = 33; // Nuclear option — only bump for CIFP binary/schema changes.
+const CACHE_VERSION = 34; // Nuclear option — only bump for CIFP binary/schema changes.
                           // For CSV data updates, edit data_version.json instead.
 
 function openDb() {
@@ -405,10 +405,7 @@ async function loadCifp() {
                   const ptype = sec.substring(0, colonIdx).trim();
                   const names = sec.substring(colonIdx + 1).split("|").map(n => n.trim()).filter(Boolean);
                   for (const pname of names) {
-                    const tildeIdx = pname.indexOf('~');
-                    const procName = tildeIdx >= 0 ? pname.substring(0, tildeIdx) : pname;
-                    const suffix = tildeIdx >= 0 ? pname.substring(tildeIdx + 1) : undefined;
-                    procs.push({ proc: procName, type: ptype, airport: "", csvProc: true, suffix });
+                    procs.push({ proc: pname, type: ptype, airport: "", csvProc: true });
                   }
                 }
               }
@@ -463,10 +460,7 @@ async function loadCifp() {
                     const type = sec.substring(0, colonIdx).trim();
                     const names = sec.substring(colonIdx + 1).split("|").map(n => n.trim()).filter(Boolean);
                     for (const name of names) {
-                      const tildeIdx = name.indexOf('~');
-                      const procName = tildeIdx >= 0 ? name.substring(0, tildeIdx) : name;
-                      const suffix = tildeIdx >= 0 ? name.substring(tildeIdx + 1) : undefined;
-                      procs.push({ proc: procName, type, airport: "", csvProc: true, suffix });
+                      procs.push({ proc: name, type, airport: "", csvProc: true });
                     }
                   }
                 } else {
