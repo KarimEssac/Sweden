@@ -2479,7 +2479,7 @@
 
         const type = document.createElement("span");
         type.textContent = fix.type;
-        type.style.cssText = "font-size:9px; color:#484f58; margin-left:" + (multiVar ? "4px" : "auto") + "; text-transform:uppercase; flex-shrink:0;";
+        type.style.cssText = "font-size:9px; color:#6e7681; margin-left:" + (multiVar ? "4px" : "auto") + "; text-transform:uppercase; flex-shrink:0;";
         row.appendChild(type);
 
         list.appendChild(row);
@@ -2969,7 +2969,7 @@
     h += '<span style="font-size:11px;color:#8b949e;">' + dist + ' NM</span>';
     h += '</div>';
     h += "</div>";
-    h += '<div style="font-size:10px;text-transform:uppercase;color:#484f58;margin-top:1px;">' + pt.type + "</div>";
+    h += '<div style="font-size:10px;text-transform:uppercase;color:#6e7681;margin-top:1px;">' + pt.type + "</div>";
     h += "</div>";
     return h;
   }
