@@ -136,6 +136,7 @@ const WAYPOINTS_CSV_URL  = `${GITHUB_RAW_BASE}/waypoints.csv`;
 const NAVAIDS_CSV_URL    = `${GITHUB_RAW_BASE}/navaids.csv`;
 const VFR_CSV_URL        = `${GITHUB_RAW_BASE}/VFR.csv`;
 const DATA_VERSION_URL   = `${GITHUB_RAW_BASE}/data_version.json`;
+const CIFP_ZIP_URL       = `${GITHUB_RAW_BASE}/cifp.zip`;
 
 // ─── Remote data version helpers ─────────────────────────────────────────────
 // The extension fetches data_version.json on every startup (it's ~15 bytes).
@@ -350,11 +351,18 @@ async function loadCifp() {
       /* console.log("[WPT] data_version changed — busting IndexedDB cache"); */
     }
 
-    // 3. Parse FAACIFP binary from local cifp.zip
+    // 3. Parse FAACIFP binary from remote/local cifp.zip
     /* console.log([WPT] No cache found, loading cifp.zip...); */
-    const url = chrome.runtime.getURL("cifp.zip");
-    const res = await fetch(url);
-    if (!res.ok) throw new Error("fetch failed: " + res.status);
+    let res;
+    try {
+      res = await fetch(CIFP_ZIP_URL);
+      if (!res.ok) throw new Error("remote fetch status: " + res.status);
+    } catch (e) {
+      /* console.log("[WPT] Remote CIFP fetch failed, falling back to local...", e); */
+      const localUrl = chrome.runtime.getURL("cifp.zip");
+      res = await fetch(localUrl);
+      if (!res.ok) throw new Error("local fetch failed: " + res.status);
+    }
 
     const buf = await res.arrayBuffer();
     const u8 = new Uint8Array(buf);
