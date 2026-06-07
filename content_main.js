@@ -819,10 +819,24 @@
           if (pt && pt.x >= -30 && pt.x <= canvas.width + 30 && pt.y >= -30 && pt.y <= canvas.height + 30) {
             const x = pt.x;
             const y = pt.y;
-            const color = COLOR["airport"] || Settings.fixColor || "#c9d1d9";
+            let color = COLOR["airport"] || Settings.fixColor || "#c9d1d9";
+            let labelColor = "#FED8B1"; // User requested specific color for hover popup
+            let shadowColor = "#ffffff";
+
+            if (highlightedNearby.type === 'heliport') {
+              if (highlightedNearby.isHospital) {
+                color = "#ff7b72";
+                labelColor = "#ff7b72";
+                shadowColor = "#ff7b72";
+              } else {
+                color = "#58a6ff";
+                labelColor = "#a5d6ff";
+                shadowColor = "#58a6ff";
+              }
+            }
             
             ctx.save();
-            ctx.shadowColor = "#ffffff";
+            ctx.shadowColor = shadowColor;
             ctx.shadowBlur = Math.round(15 + 10 * Math.sin(Date.now() / 150)) * dpr;
             ctx.fillStyle = "#ffffff"; // core pops white
             ctx.strokeStyle = "rgba(0,0,0,0.75)";
@@ -880,7 +894,6 @@
               ctx.font = `bold ${fs}px monospace`;
               ctx.globalAlpha = Settings.opacity;
               ctx.lineWidth = 3 * dpr;
-              const labelColor = "#FED8B1"; // User requested specific color for hover popup
               ctx.strokeStyle = isDarkColor(labelColor) ? "rgba(255,255,255,0.9)" : "rgba(0,0,0,0.9)";
               const label = highlightedNearby.name ? `${highlightedNearby.icao} (${highlightedNearby.name})` : highlightedNearby.icao;
               
@@ -3380,6 +3393,7 @@
   let _nearbyQuery = "";
   let _nearbyFetchTimer = null;   // guards real-time refresh
   let _nearbyLastFetch = 0;       // timestamp of last successful fetch
+  let _nearbyActiveTab = "airports"; // "airports" or "helipads"
 
   function _nearbyScheduleRefresh(pts) {
     if (!document.getElementById("sweden-nearby-modal")) return; // modal not open
@@ -3410,14 +3424,22 @@
     var trackData = extractPlaneTrack();
     if (!trackData || trackData.pts.length < 1) return;
 
+    // Reset default active tab to airports
+    _nearbyActiveTab = "airports";
+
     // Create modal
     var modal = document.createElement("div");
     modal.id = "sweden-nearby-modal";
     modal.style.cssText = "position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:380px;max-height:70vh;background:#0d1117;border:1px solid #30363d;border-radius:10px;box-shadow:0 12px 48px rgba(0,0,0,0.7);z-index:10002;display:flex;flex-direction:column;font-family:-apple-system,BlinkMacSystemFont,monospace;";
 
     modal.innerHTML = '<div id="sweden-nearby-drag" style="padding:10px 14px;background:#161b22;border-bottom:1px solid #30363d;border-radius:10px 10px 0 0;display:flex;justify-content:space-between;align-items:center;cursor:move;">'
-      + '<span style="color:#c9d1d9;font-weight:bold;font-size:13px;">Nearby Airports (&lt; 100 NM)</span>'
+      + '<span style="color:#c9d1d9;font-weight:bold;font-size:13px;">Nearby Finder (&lt; 100 NM)</span>'
       + '<span id="sweden-nearby-close" style="color:#8b949e;cursor:pointer;font-size:18px;line-height:1;">&times;</span>'
+      + '</div>'
+      // Tab Bar
+      + '<div style="display:flex;background:#161b22;border-bottom:1px solid #30363d;padding:0 8px;">'
+      + '<div id="sw-nearby-tab-airports" style="padding:8px 12px;color:#c9d1d9;font-size:12px;font-weight:bold;cursor:pointer;border-bottom:2px solid #58a6ff;transition:all 0.15s;">Airports</div>'
+      + '<div id="sw-nearby-tab-helipads" style="padding:8px 12px;color:#8b949e;font-size:12px;font-weight:bold;cursor:pointer;border-bottom:2px solid transparent;transition:all 0.15s;margin-left:4px;">Helipads</div>'
       + '</div>'
       + '<div style="padding:8px 12px;border-bottom:1px solid #30363d;">'
       + '<input type="text" id="sweden-nearby-search" placeholder="Search airports..." style="width:100%;box-sizing:border-box;background:#161b22;border:1px solid #30363d;color:#c9d1d9;padding:6px 10px;border-radius:4px;outline:none;font-size:12px;font-family:monospace;" />'
@@ -3464,8 +3486,33 @@
     window.addEventListener("keyup", blockKeys, true);
     window.addEventListener("keypress", blockKeys, true);
 
+    // Tab actions
+    var tabAirports = modal.querySelector("#sw-nearby-tab-airports");
+    var tabHelipads = modal.querySelector("#sw-nearby-tab-helipads");
+    var searchInput = modal.querySelector("#sweden-nearby-search");
+
+    tabAirports.onclick = function() {
+      _nearbyActiveTab = "airports";
+      tabAirports.style.color = "#c9d1d9";
+      tabAirports.style.borderBottom = "2px solid #58a6ff";
+      tabHelipads.style.color = "#8b949e";
+      tabHelipads.style.borderBottom = "2px solid transparent";
+      searchInput.placeholder = "Search airports...";
+      renderNearbyList();
+    };
+
+    tabHelipads.onclick = function() {
+      _nearbyActiveTab = "helipads";
+      tabAirports.style.color = "#8b949e";
+      tabAirports.style.borderBottom = "2px solid transparent";
+      tabHelipads.style.color = "#c9d1d9";
+      tabHelipads.style.borderBottom = "2px solid #58a6ff";
+      searchInput.placeholder = "Search helipads...";
+      renderNearbyList();
+    };
+
     // Search input
-    modal.querySelector("#sweden-nearby-search").addEventListener("input", function (e) {
+    searchInput.addEventListener("input", function (e) {
       _nearbyQuery = e.target.value.trim().toUpperCase();
       renderNearbyList();
     });
@@ -3539,11 +3586,22 @@
     if (_nearbyFetching && _nearbyAirports.length === 0) {
       listEl.innerHTML = '<div style="padding:20px;text-align:center;color:#484f58;font-size:12px;display:flex;align-items:center;justify-content:center;gap:6px;">'
         + '<span style="display:inline-block;width:12px;height:12px;border:2px solid #30363d;border-top-color:#58a6ff;border-radius:50%;animation:sw-trk-spin 0.8s linear infinite;"></span>'
-        + 'Scanning nearby airports...</div>';
+        + 'Scanning nearby ' + (_nearbyActiveTab === "airports" ? "airports" : "helipads") + '...</div>';
       return;
     }
 
     var items = _nearbyAirports;
+
+    // Filter by active tab
+    if (_nearbyActiveTab === "airports") {
+      items = items.filter(function (a) {
+        return a.type === 'large_airport' || a.type === 'medium_airport' || a.type === 'small_airport';
+      });
+    } else {
+      items = items.filter(function (a) {
+        return a.type === 'heliport';
+      });
+    }
 
     // Fuzzy filter
     if (_nearbyQuery) {
@@ -3573,21 +3631,41 @@
     }
 
     if (items.length === 0) {
-      listEl.innerHTML = '<div style="padding:20px;text-align:center;color:#484f58;font-size:12px;">' + (_nearbyQuery ? "No airports match your search" : "No airports found nearby") + '</div>';
+      var emptyText = _nearbyQuery
+        ? (_nearbyActiveTab === "airports" ? "No airports match your search" : "No helipads match your search")
+        : (_nearbyActiveTab === "airports" ? "No airports found nearby" : "No helipads found nearby");
+      listEl.innerHTML = '<div style="padding:20px;text-align:center;color:#484f58;font-size:12px;">' + emptyText + '</div>';
       return;
     }
 
-    var h = '<div style="padding:4px 12px;font-size:10px;color:#484f58;border-bottom:1px solid #21262d;">' + items.length + ' airport' + (items.length !== 1 ? 's' : '') + ' found</div>';
+    var h = '<div style="padding:4px 12px;font-size:10px;color:#484f58;border-bottom:1px solid #21262d;">'
+      + items.length + ' ' + (_nearbyActiveTab === "airports" ? "airport" : "helipad") + (items.length !== 1 ? 's' : '') + ' found</div>';
     for (var i = 0; i < items.length; i++) {
       var a = items[i];
-      var typeLabel = a.type === 'large_airport' ? 'LRG' : a.type === 'medium_airport' ? 'MED' : 'SML';
-      var typeColor = a.type === 'large_airport' ? '#58a6ff' : a.type === 'medium_airport' ? '#3fb950' : '#8b949e';
+      var typeLabel, typeColor, icaoColor;
+
+      if (a.type === 'heliport') {
+        if (a.isHospital) {
+          typeLabel = 'HSP';
+          typeColor = '#ff7b72'; // GitHub emergency red/coral
+          icaoColor = '#ff7b72';
+        } else {
+          typeLabel = 'HPD';
+          typeColor = '#58a6ff'; // Sky blue
+          icaoColor = '#a5d6ff'; // Light blue
+        }
+      } else {
+        typeLabel = a.type === 'large_airport' ? 'LRG' : a.type === 'medium_airport' ? 'MED' : 'SML';
+        typeColor = a.type === 'large_airport' ? '#58a6ff' : a.type === 'medium_airport' ? '#3fb950' : '#8b949e';
+        icaoColor = '#FED8B1';
+      }
+
       var iataStr = a.iata ? ' (' + a.iata + ')' : '';
       var url = airportExternalUrl(a.icao, a.country);
       h += '<div class="sw-nearby-item" data-url="' + url + '" data-lat="' + a.lat + '" data-lon="' + a.lon + '" style="display:block;padding:8px 12px;border-bottom:1px solid #21262d;cursor:pointer;transition:background 0.1s;">'
         + '<div style="display:flex;align-items:baseline;justify-content:space-between;">'
         + '<div style="display:flex;align-items:baseline;gap:6px;min-width:0;flex:1;">'
-        + '<span class="sw-nearby-icao" data-icao="' + a.icao + '" data-name="' + (a.name || "").replace(/"/g, '&quot;') + '" style="color:#FED8B1;font-weight:bold;font-size:13px;font-family:monospace;flex-shrink:0;">' + a.icao + '</span>'
+        + '<span class="sw-nearby-icao" data-icao="' + a.icao + '" data-name="' + (a.name || "").replace(/"/g, '&quot;') + '" style="color:' + icaoColor + ';font-weight:bold;font-size:13px;font-family:monospace;flex-shrink:0;">' + a.icao + '</span>'
         + '<span style="color:#8b949e;font-size:10px;flex-shrink:0;">' + iataStr + '</span>'
         + '<span style="color:#c9d1d9;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + a.name + '</span>'
         + '</div>'

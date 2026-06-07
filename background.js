@@ -79,8 +79,19 @@ function _parseOurAirportsCsv(text) {
     const lat = parseFloat(cols[iLat]);
     const lon = parseFloat(cols[iLon]);
     const aType = (cols[iType] || '').trim();
-    if (!isNaN(lat) && !isNaN(lon) && (aType === 'large_airport' || aType === 'medium_airport' || aType === 'small_airport')) {
+    if (!isNaN(lat) && !isNaN(lon) && (aType === 'large_airport' || aType === 'medium_airport' || aType === 'small_airport' || aType === 'heliport')) {
       if (icao) {
+        const isHospital = aType === 'heliport' && (
+          name.toLowerCase().includes('hospital') ||
+          name.toLowerCase().includes('medical') ||
+          name.toLowerCase().includes('clinic') ||
+          name.toLowerCase().includes('health') ||
+          name.toLowerCase().includes('sjukhus') ||
+          name.toLowerCase().includes('lasarett') ||
+          name.toLowerCase().includes('klinik') ||
+          name.toLowerCase().includes('vård') ||
+          name.toLowerCase().includes('care')
+        );
         list.push({
           icao: icao,
           name: name,
@@ -89,7 +100,8 @@ function _parseOurAirportsCsv(text) {
           type: aType,
           iata: iata || null,
           city: city,
-          country: country
+          country: country,
+          isHospital: isHospital
         });
       }
     }
@@ -1377,6 +1389,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         let best = null;
         let bestDist = Infinity;
         for (const apt of _ourAirportsList) {
+          if (apt.type === 'heliport') continue; // only detect airports as origin/destination
           const d = haversineNm(lat, lon, apt.lat, apt.lon);
           if (d < bestDist) {
             bestDist = d;
