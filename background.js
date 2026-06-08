@@ -175,7 +175,7 @@ const DB_NAME = "AdsbWptCache";
 const STORE_NAME = "fixes";
 const MOAS_STORE = "moas";
 const FBOS_STORE = "fbos";
-const CACHE_VERSION = 34; // Nuclear option — only bump for CIFP binary/schema changes.
+const CACHE_VERSION = 35; // Nuclear option — only bump for CIFP binary/schema changes.
                           // For CSV data updates, edit data_version.json instead.
 
 function openDb() {
