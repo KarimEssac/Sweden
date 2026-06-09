@@ -405,11 +405,18 @@ async function doSearch(q) {
 
 function getRootProcs(fix) {
   if (!fix || !fix.procs || !fix.procs.length) return [];
+  const seen = new Set();
   return fix.procs.filter(p => {
-    if (p.csvProc) return true;
-    if (!p.proc.startsWith(fix.ident)) return false;
-    const num = p.proc.substring(fix.ident.length).trim();
-    return num.length > 0 && /\d/.test(num);
+    if (!p.proc) return false;
+    if (!p.csvProc) {
+      if (!p.proc.startsWith(fix.ident)) return false;
+      const num = p.proc.substring(fix.ident.length).trim();
+      if (num.length === 0 || !/\d/.test(num)) return false;
+    }
+    const key = `${p.type || ""}|${p.proc}`.toUpperCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
   });
 }
 

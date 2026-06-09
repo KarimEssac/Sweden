@@ -284,11 +284,18 @@
   }
   function getRootProcs(fix) {
     if (!fix || !fix.procs || !fix.procs.length) return [];
+    const seen = new Set();
     return fix.procs.filter(p => {
-      if (p.csvProc) return true;
-      if (!p.proc.startsWith(fix.ident)) return false;
-      const num = p.proc.substring(fix.ident.length).trim();
-      return num.length > 0 && /\d/.test(num);
+      if (!p.proc) return false;
+      if (!p.csvProc) {
+        if (!p.proc.startsWith(fix.ident)) return false;
+        const num = p.proc.substring(fix.ident.length).trim();
+        if (num.length === 0 || !/\d/.test(num)) return false;
+      }
+      const key = `${p.type || ""}|${p.proc}`.toUpperCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
     });
   }
 
@@ -311,8 +318,9 @@
   function hasMultipleVariants(fix) {
     const rp = getRootProcs(fix);
     if (rp.length < 1) return false;
-    // True if any csvProc has a specific charted name (e.g., "BERSU 2G" != "BERSU")
-    return rp.some(p => p.csvProc && p.proc !== fix.ident);
+    // True if any source has a specific charted name (e.g., "BERSU 2G" != "BERSU").
+    // CIFP SID/STAR roots also arrive this way, so they should expose the same Ctrl menu.
+    return rp.some(p => p.proc !== fix.ident);
   }
 
   // Persistent variants popup state
@@ -418,8 +426,8 @@
     // Only apply proc copy behavior to waypoints, not navaids/VFR
     if (fix.type !== "fix") return null;
     const p = rootProcs[0];
-    // Multi-variant CSV procs: just copy the ident on normal click
-    if (p.csvProc && hasMultipleVariants(fix)) return null;
+    // Variant procs: normal click copies the ident; Ctrl opens choices for ident/procedure.
+    if (hasMultipleVariants(fix)) return null;
     if (p.csvProc) {
       // Single variant CSV proc — copy readback
       return procVariantReadback(p.proc);
