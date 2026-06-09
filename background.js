@@ -175,7 +175,7 @@ const DB_NAME = "AdsbWptCache";
 const STORE_NAME = "fixes";
 const MOAS_STORE = "moas";
 const FBOS_STORE = "fbos";
-const CACHE_VERSION = 35; // Nuclear option — only bump for CIFP binary/schema changes.
+const CACHE_VERSION = 36; // Nuclear option — only bump for CIFP binary/schema changes.
                           // For CSV data updates, edit data_version.json instead.
 
 function openDb() {
@@ -560,11 +560,15 @@ function parseCifp(text) {
     const fixIdent = line.substring(29, 34).trim();
     if (!fixIdent || fixIdent.length < 2) continue;
     if (fixIdent.startsWith("RW")) continue;
-    if (!/^[A-Z]{2,5}$/.test(fixIdent)) continue;  // letters only, no digits
+    if (!/^(?=.*[A-Z])[A-Z0-9]{2,5}$/.test(fixIdent)) continue;
 
-    // Parse display name: "DIDLY5" → "DIDLY 5", "BEREE3" → "BEREE 3"
-    const pm = procCode.match(/^([A-Z]+)(\d+)$/);
-    const displayName = pm ? `${pm[1]} ${pm[2]}` : procCode;
+    // Only mark the procedure's named/root fix, not every leg in the route.
+    // This also supports numbered root fixes such as "ONE01" when the CIFP
+    // procedure code is stored as "ONE011".
+    if (!procCode.startsWith(fixIdent)) continue;
+    const procSuffix = procCode.substring(fixIdent.length).trim();
+    if (!/\d/.test(procSuffix)) continue;
+    const displayName = `${fixIdent} ${procSuffix}`.trim();
 
     if (!FIX_PROCS.has(fixIdent)) FIX_PROCS.set(fixIdent, []);
     const arr = FIX_PROCS.get(fixIdent);
@@ -587,7 +591,7 @@ function parseCifp(text) {
 
     if (!ident || ident.length < 2) continue;
     if (ident.startsWith("RW")) continue;    // skip runway designators
-    if (!/^[A-Z]{2,5}$/.test(ident)) continue;  // letters only, no digits
+    if (!/^(?=.*[A-Z])[A-Z0-9]{2,5}$/.test(ident)) continue;
 
     try {
       const { lat, lon } = parseCifpLatLon(coordMatch[0]);
@@ -598,6 +602,11 @@ function parseCifp(text) {
 
       let type = lineType(line);
       if (!type) continue;  // skip removed types (intersections)
+
+      // Terminal procedure roots live in P-section CIFP records, but they are
+      // waypoints for overlay/highlight behavior rather than airports.
+      const procs = FIX_PROCS.get(ident) || undefined;
+      if (type === "airport" && procs) type = "fix";
 
       // Waypoints (fixes/airports) must have exactly 5-letter idents.
       // Shorter idents that aren't VORs or NDBs are procedure/approach fixes — skip them.
@@ -636,9 +645,6 @@ function parseCifp(text) {
       } else {
         identCoords.set(ident, [{ lat, lon }]);
       }
-
-      // Attach procedure info if available
-      const procs = FIX_PROCS.get(ident) || undefined;
 
       FIXES.push({ ident, lat, lon, type, name, airport, procs });
       count++;
