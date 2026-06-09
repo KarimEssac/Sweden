@@ -175,7 +175,7 @@ const DB_NAME = "AdsbWptCache";
 const STORE_NAME = "fixes";
 const MOAS_STORE = "moas";
 const FBOS_STORE = "fbos";
-const CACHE_VERSION = 36; // Nuclear option — only bump for CIFP binary/schema changes.
+const CACHE_VERSION = 37; // Nuclear option — only bump for CIFP binary/schema changes.
                           // For CSV data updates, edit data_version.json instead.
 
 function openDb() {
@@ -611,6 +611,9 @@ function parseCifp(text) {
       // Waypoints (fixes/airports) must have exactly 5-letter idents.
       // Shorter idents that aren't VORs or NDBs are procedure/approach fixes — skip them.
       if ((type === "fix" || type === "airport") && ident.length !== 5) continue;
+
+      // Exclude VFR waypoints since they are handled via VFR.csv
+      if (ident.startsWith("VP") && line[26] === 'V') continue;
 
       let name = undefined;
       let airport = undefined;
