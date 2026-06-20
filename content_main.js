@@ -2574,16 +2574,89 @@
   let globalTrackerQuery = "";
   let zoneQueries = { crossed: "", "5nm": "", "10nm": "", "15nm": "", "20nm": "" };
   let openZones = { crossed: true, "5nm": false, "10nm": false, "15nm": false, "20nm": false };
+  let trackerTrackMode = "live"; // "live" uses the displayed trail; "full" uses the completed replay leg
+
+  // Filter states
+  let trackerMinAlt = null;
+  let trackerMinSpeed = null;
+  let trackerMaxAlt = null;
+  let trackerMaxSpeed = null;
 
   // Route info state
   let trackerRouteInfo = null;      // { callsign, airline, origin, destination } or null
   let trackerRouteCallsign = "";    // last callsign we fetched route for
   let trackerRouteTimestamp = 0;    // last timestamp bucket we fetched route for (1-hour granularity)
   let trackerRouteFirstPt = null;   // last drawn trail start point {lat, lon}
+  let trackerRouteHasCompleteLeg = false;
   let trackerRouteFetching = false; // true while fetch is in-flight
 
   // Memory guard: idents that were ever crossed (<1 NM) are immortal — never evicted
   const crossedIdents = new Set();
+
+  function renderTrackerTrackMode(fullHistoryReady) {
+    const liveBtn = document.getElementById("sweden-trk-mode-live");
+    const fullBtn = document.getElementById("sweden-trk-mode-full");
+    if (!liveBtn || !fullBtn) return;
+
+    const liveActive = trackerTrackMode === "live";
+    liveBtn.style.background = liveActive ? "rgba(88,166,255,0.22)" : "transparent";
+    liveBtn.style.color = liveActive ? "#58a6ff" : "#8b949e";
+    liveBtn.style.borderColor = liveActive ? "#58a6ff66" : "transparent";
+    fullBtn.style.background = !liveActive ? "rgba(88,166,255,0.22)" : "transparent";
+    fullBtn.style.color = !liveActive ? (fullHistoryReady ? "#58a6ff" : "#d29922") : "#8b949e";
+    fullBtn.style.borderColor = !liveActive ? (fullHistoryReady ? "#58a6ff66" : "#d2992266") : "transparent";
+    fullBtn.textContent = !liveActive && !fullHistoryReady ? "Loading entire route..." : "Entire flight route";
+    fullBtn.title = fullHistoryReady ? "Use the complete recorded flight leg" : "Waiting for the complete ADS-B replay trace";
+  }
+
+  // tar1090's replay trace contains the completed historical route, including
+  // points after the replay cursor. Keep only the leg containing that cursor.
+  function extractHistoricalRouteLeg(timestampMs) {
+    if (typeof SelectedPlane === "undefined" || !SelectedPlane ||
+        !SelectedPlane.fullTrace || !Array.isArray(SelectedPlane.fullTrace.trace)) return null;
+
+    const trace = SelectedPlane.fullTrace.trace;
+    if (trace.length < 2) return null;
+
+    const cursorSec = timestampMs / 1000;
+    let cursorIdx = -1;
+    for (let i = 0; i < trace.length; i++) {
+      if (Number(trace[i][0]) <= cursorSec) cursorIdx = i;
+      else break;
+    }
+    if (cursorIdx < 0) return null;
+
+    // Trace flag bit 1 (value 2) marks the start of a new flight leg.
+    let start = 0;
+    for (let i = 0; i <= cursorIdx; i++) {
+      if ((Number(trace[i][6]) || 0) & 2) start = i;
+    }
+    let end = trace.length;
+    for (let i = cursorIdx + 1; i < trace.length; i++) {
+      if ((Number(trace[i][6]) || 0) & 2) {
+        end = i;
+        break;
+      }
+    }
+
+    const finalTs = end > start ? Number(trace[end - 1][0]) : 0;
+    if (!finalTs || finalTs <= cursorSec + 30) return null;
+
+    const pts = [];
+    const seen = new Set();
+    for (let i = start; i < end; i++) {
+      const state = trace[i];
+      const lat = Number(state[1]);
+      const lon = Number(state[2]);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+      const key = lat.toFixed(5) + "," + lon.toFixed(5);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      pts.push({ lat, lon, alt: state[3] != null ? state[3] : null, gs: state[4] != null ? state[4] : null });
+    }
+
+    return pts.length > 1 ? { pts, finalTs } : null;
+  }
 
   function extractPlaneTrack() {
     if (typeof SelectedPlane === "undefined" || !SelectedPlane) return null;
@@ -2660,7 +2733,17 @@
       }
     }
 
-    return pts.length > 1 ? { pts, callsign, registration, timestamp } : null;
+    const historicalLeg = extractHistoricalRouteLeg(timestamp);
+    const aircraftId = String(SelectedPlane.icao || SelectedPlane.hex || "").trim().toUpperCase();
+    return pts.length > 1 ? {
+      pts,
+      routePts: historicalLeg ? historicalLeg.pts : pts,
+      hasCompleteHistoricalLeg: !!historicalLeg,
+      callsign,
+      registration,
+      aircraftId,
+      timestamp
+    } : null;
   }
 
   async function updateTrackerData() {
@@ -2673,13 +2756,20 @@
       if (trackerRouteCallsign) {
         trackerRouteCallsign = "";
         trackerRouteTimestamp = 0;
+        trackerRouteFirstPt = null;
+        trackerRouteHasCompleteLeg = false;
         trackerRouteInfo = null;
         renderRouteInfo();
       }
       return;
     }
-    const pts = trackData.pts;
+    const livePts = trackData.pts;
+    const routePts = trackData.routePts || livePts;
+    const fullHistoryReady = !!trackData.hasCompleteHistoricalLeg;
+    const pts = trackerTrackMode === "full" && fullHistoryReady ? routePts : livePts;
+    renderTrackerTrackMode(fullHistoryReady);
     const callsign = trackData.callsign;
+    const routeKey = callsign || trackData.registration || trackData.aircraftId;
 
     // ── Async route lookup (non-blocking) ─────────────────────────────────
     // Re-fetch when: (a) callsign changes, (b) trail start point moved significantly
@@ -2695,29 +2785,32 @@
     // guaranteeing a re-fetch even when the physical origin is the same airport.
     let shouldFetch = false;
     let callsignChanged = false;
-    const firstPt = pts.length > 0 ? pts[0] : null;
+    const firstPt = routePts.length > 0 ? routePts[0] : null;
     // 15-minute bucket: changes whenever the flight clock advances past a boundary
     const tsBucket = Math.floor(trackData.timestamp / 900000);
 
-    if (callsign && callsign !== trackerRouteCallsign) {
+    if (routeKey && routeKey !== trackerRouteCallsign) {
       shouldFetch = true;
       callsignChanged = true;
-      trackerRouteCallsign = callsign;
+      trackerRouteCallsign = routeKey;
       trackerRouteTimestamp = trackData.timestamp;
       trackerRouteFirstPt = firstPt;
-    } else if (callsign && firstPt && trackerRouteFirstPt) {
+      trackerRouteHasCompleteLeg = trackData.hasCompleteHistoricalLeg;
+    } else if (routeKey && firstPt && trackerRouteFirstPt) {
       const dLat = firstPt.lat - trackerRouteFirstPt.lat;
       const dLon = firstPt.lon - trackerRouteFirstPt.lon;
       const distSq = (dLat * dLat) + (dLon * dLon);
       // ~0.6 NM threshold — trail start moved to a different airport
       const startMoved = distSq > 0.0001;
+      const completionChanged = trackData.hasCompleteHistoricalLeg !== trackerRouteHasCompleteLeg;
       // Timestamp bucket changed — same airport but different departure time (return trip)
       const bucketChanged = Math.floor(trackerRouteTimestamp / 900000) !== tsBucket;
 
-      if (startMoved || bucketChanged) {
+      if (startMoved || completionChanged || bucketChanged) {
         shouldFetch = true;
         trackerRouteTimestamp = trackData.timestamp;
         trackerRouteFirstPt = firstPt;
+        trackerRouteHasCompleteLeg = trackData.hasCompleteHistoricalLeg;
       }
     }
 
@@ -2749,46 +2842,41 @@
       }
 
       // ── HYBRID APPROACH ──────────────────────────────────────────────────
-      // Step 1: Get the ORIGIN from ADS-B trail (first GPS point → nearest airport).
-      //         This is always correct because the trail physically starts where the plane took off.
-      // Step 2: Pass that GPS origin to LOOKUP_ROUTE so FlightAware results are filtered
-      //         to ONLY match flights departing from that airport.
-      //         FlightAware gives us the DESTINATION (since the plane may not have arrived yet on ADS-B).
-      // Step 3: If FlightAware fails entirely, fall back to GPS for both origin and destination.
+      // Use the completed replay leg for both endpoints. FlightAware is only a
+      // fallback for an endpoint that ADS-B cannot establish reliably.
       (async () => {
         try {
-          // Step 1: Detect origin from ADS-B trail
-          var gpsDet = await bgRequest({ type: "DETECT_ORIGIN_DEST_FROM_TRACK", points: pts }).catch(() => null);
+          var gpsDet = await bgRequest({
+            type: "DETECT_ORIGIN_DEST_FROM_TRACK",
+            points: routePts,
+            requireCompletedArrival: trackData.hasCompleteHistoricalLeg
+          }).catch(() => null);
           var gpsOriginIcao = (gpsDet && gpsDet.origin && gpsDet.origin.icao) ? gpsDet.origin.icao : null;
 
-          // Step 2: Fetch FlightAware route, passing gpsOrigin to filter results
-          var res = await bgRequest({
-            type: "LOOKUP_ROUTE",
-            callsign: callsign,
-            registration: trackData.registration,
-            timestamp: trackData.timestamp,
-            gpsOrigin: gpsOriginIcao  // NEW: tells background.js to prefer flights from this origin
-          }).catch(() => null);
+          // ADS-B is primary. FlightAware fills only endpoints that the
+          // completed historical trace could not identify reliably.
+          var r = {
+            callsign: callsign || trackData.registration || trackData.aircraftId,
+            airline: null,
+            origin: gpsDet && gpsDet.origin ? gpsDet.origin : null,
+            destination: gpsDet && gpsDet.destination ? gpsDet.destination : null
+          };
 
-          var r = (res && res.route) ? res.route : null;
-
-          // If FlightAware returned a result, use it directly.
-          // The GPS origin was already used by background.js to filter for the correct leg,
-          // so FlightAware's origin+destination pair is already the right one.
-          // Only fall back to GPS when FlightAware returned nothing.
-          if (!r || (!r.origin && !r.destination)) {
-            if (gpsOriginIcao || (gpsDet && gpsDet.destination)) {
-              r = r || { callsign: callsign, airline: null, origin: null, destination: null };
-              if (gpsOriginIcao) r.origin = { icao: gpsOriginIcao, iata: null, name: null, city: null, country: gpsDet.origin.country || null };
-              if (gpsDet && gpsDet.destination) r.destination = gpsDet.destination;
+          if (!r.origin || !r.destination) {
+            var res = await bgRequest({
+              type: "LOOKUP_ROUTE",
+              callsign: callsign,
+              registration: trackData.registration,
+              timestamp: trackData.timestamp,
+              gpsOrigin: gpsOriginIcao
+            }).catch(() => null);
+            var fa = (res && res.route) ? res.route : null;
+            if (fa) {
+              if (!r.origin && fa.origin) r.origin = fa.origin;
+              if (!r.destination && fa.destination) r.destination = fa.destination;
+              r.airline = fa.airline || null;
+              r.callsignIata = fa.callsignIata || null;
             }
-          }
-
-          if (!r || (!r.origin && !r.destination)) {
-            trackerRouteFetching = false;
-            trackerRouteInfo = null;
-            renderRouteInfo();
-            return;
           }
 
           r = await enrichAirports(r);
@@ -2889,6 +2977,24 @@
 
       pt.distance = minDist;
       pt.nearestSegIdx = nearestSegIdx;
+
+      let nearestPtIdx = nearestSegIdx;
+      if (pts.length > 1 && nearestSegIdx < pts.length - 1) {
+        const d1 = haversineDistance(pts[nearestSegIdx].lat, pts[nearestSegIdx].lon, pt.lat, pt.lon);
+        const d2 = haversineDistance(pts[nearestSegIdx + 1].lat, pts[nearestSegIdx + 1].lon, pt.lat, pt.lon);
+        if (d2 < d1) nearestPtIdx = nearestSegIdx + 1;
+      }
+      const rawAlt = (pts[nearestPtIdx] && pts[nearestPtIdx].alt != null) ? pts[nearestPtIdx].alt : null;
+      if (rawAlt === "ground" || rawAlt === "Ground") {
+        pt.altitude = 0;
+      } else {
+        const parsedAlt = parseInt(rawAlt, 10);
+        pt.altitude = isNaN(parsedAlt) ? null : parsedAlt;
+      }
+
+      const rawSpeed = (pts[nearestPtIdx] && pts[nearestPtIdx].gs != null) ? pts[nearestPtIdx].gs : null;
+      const parsedSpeed = parseInt(rawSpeed, 10);
+      pt.speed = isNaN(parsedSpeed) ? null : parsedSpeed;
       if (minDist <= 1.0) zones.crossed.push(pt);
       else if (minDist <= 5.0) zones["5nm"].push(pt);
       else if (minDist <= 10.0) zones["10nm"].push(pt);
@@ -2987,7 +3093,24 @@
       h += '<span style="display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:3px;background:rgba(88,166,255,0.15);border:1px solid rgba(88,166,255,0.35);color:#58a6ff;font-size:10px;font-weight:bold;line-height:1;">+</span>';
       h += '<span style="color:#484f58;font-size:9px;font-style:italic;">Ctrl</span>';
     }
-    h += '<span style="font-size:11px;color:#8b949e;">' + dist + ' NM</span>';
+    let altSpeedStr = "";
+    const hasFilterActive = (trackerMinAlt !== null || trackerMaxAlt !== null || trackerMinSpeed !== null || trackerMaxSpeed !== null);
+    if (hasFilterActive) {
+      if (pt.altitude != null) {
+        if (pt.altitude === 0) {
+          altSpeedStr += 'ground';
+        } else {
+          altSpeedStr += Math.round(pt.altitude).toLocaleString() + ' ft';
+        }
+        if (pt.speed != null) {
+          altSpeedStr += ' / ' + Math.round(pt.speed) + ' kt';
+        }
+        altSpeedStr += ' &nbsp;&nbsp;';
+      } else if (pt.speed != null) {
+        altSpeedStr += Math.round(pt.speed) + ' kt &nbsp;&nbsp;';
+      }
+    }
+    h += '<span style="font-size:11px;color:#8b949e;">' + altSpeedStr + dist + ' NM</span>';
     h += '</div>';
     h += "</div>";
     h += '<div style="font-size:10px;text-transform:uppercase;color:#6e7681;margin-top:1px;">' + pt.type + "</div>";
@@ -3109,6 +3232,13 @@
       for (const c of zoneLabels) {
         for (const pt of (currentTrackerData.zones[c.key] || [])) {
           if (pt.type === "moa") continue;
+
+          // Apply altitude and speed filters
+          if (trackerMinAlt !== null && (pt.altitude === null || pt.altitude < trackerMinAlt)) continue;
+          if (trackerMaxAlt !== null && (pt.altitude === null || pt.altitude > trackerMaxAlt)) continue;
+          if (trackerMinSpeed !== null && (pt.speed === null || pt.speed < trackerMinSpeed)) continue;
+          if (trackerMaxSpeed !== null && (pt.speed === null || pt.speed > trackerMaxSpeed)) continue;
+
           const key = (pt.ident || "") + "|" + (pt.type || "");
           if (seen.has(key)) continue;
           seen.add(key);
@@ -3149,6 +3279,16 @@
         const allItems = currentTrackerData.zones[typingInZone] || [];
         const cq = (zoneQueries[typingInZone] || "").trim().toUpperCase();
         let listItems = allItems.filter(function (i) { return i.type !== "moa"; });
+
+        // Apply altitude and speed filters
+        listItems = listItems.filter(function (i) {
+          if (trackerMinAlt !== null && (i.altitude === null || i.altitude < trackerMinAlt)) return false;
+          if (trackerMaxAlt !== null && (i.altitude === null || i.altitude > trackerMaxAlt)) return false;
+          if (trackerMinSpeed !== null && (i.speed === null || i.speed < trackerMinSpeed)) return false;
+          if (trackerMaxSpeed !== null && (i.speed === null || i.speed > trackerMaxSpeed)) return false;
+          return true;
+        });
+
         if (cq) {
           listItems = listItems.map(function (i) {
             return { item: i, score: trFuzzyScore(i, cq) };
@@ -3170,7 +3310,17 @@
         for (const c of zoneLabels) {
           const hdrCountEl = listCont.querySelector('.tracker-zone-hdr[data-zone="' + c.key + '"] .sw-trk-count');
           if (hdrCountEl) {
-            const cnt = (currentTrackerData.zones[c.key] || []).length;
+            const zoneItems = currentTrackerData.zones[c.key] || [];
+            const moas = zoneItems.filter(function (i) { return i.type === "moa"; });
+            const waypoints = zoneItems.filter(function (i) { return i.type !== "moa"; });
+            const visibleWaypoints = waypoints.filter(function (i) {
+              if (trackerMinAlt !== null && (i.altitude === null || i.altitude < trackerMinAlt)) return false;
+              if (trackerMaxAlt !== null && (i.altitude === null || i.altitude > trackerMaxAlt)) return false;
+              if (trackerMinSpeed !== null && (i.speed === null || i.speed < trackerMinSpeed)) return false;
+              if (trackerMaxSpeed !== null && (i.speed === null || i.speed > trackerMaxSpeed)) return false;
+              return true;
+            });
+            const cnt = visibleWaypoints.length + moas.length;
             hdrCountEl.textContent = "(" + cnt + ")";
           }
         }
@@ -3187,6 +3337,15 @@
       const moaItems = allItems.filter(function (i) { return i.type === "moa"; });
       let listItems = allItems.filter(function (i) { return i.type !== "moa"; });
 
+      // Apply altitude and speed filters
+      listItems = listItems.filter(function (i) {
+        if (trackerMinAlt !== null && (i.altitude === null || i.altitude < trackerMinAlt)) return false;
+        if (trackerMaxAlt !== null && (i.altitude === null || i.altitude > trackerMaxAlt)) return false;
+        if (trackerMinSpeed !== null && (i.speed === null || i.speed < trackerMinSpeed)) return false;
+        if (trackerMaxSpeed !== null && (i.speed === null || i.speed > trackerMaxSpeed)) return false;
+        return true;
+      });
+
       // Per-zone fuzzy filter+sort
       if (cq) {
         listItems = listItems.map(function (i) {
@@ -3196,7 +3355,7 @@
           .map(function (x) { return x.item; });
       }
 
-      const totalCnt = allItems.length;
+      const totalCnt = listItems.length + moaItems.length;
       const isOpen = openZones[c.key];
 
       // MOA pills in header
@@ -3342,12 +3501,20 @@
     }
 
     // Origin → Destination row (always shown when we have at least origin)
-    if (r.origin) {
-      var oIcao = r.origin.icao || '????';
-      var oIata = r.origin.iata ? ' (' + r.origin.iata + ')' : '';
-      var oUrl = airportExternalUrl(oIcao, r.origin.country);
-      var oUrlLabel = airportExternalUrlLabel(oIcao, r.origin.country);
-      var oName = r.origin.name || '';
+    {
+      var originBlock;
+      if (r.origin && r.origin.icao) {
+        var oIcao = r.origin.icao;
+        var oIata = r.origin.iata ? ' (' + r.origin.iata + ')' : '';
+        var oUrl = airportExternalUrl(oIcao, r.origin.country);
+        var oUrlLabel = airportExternalUrlLabel(oIcao, r.origin.country);
+        var oName = r.origin.name || '';
+        originBlock = '<a href="' + oUrl + '" target="_blank" rel="noopener" style="color:#3fb950;font-weight:bold;font-size:14px;font-family:monospace;text-decoration:none;border-bottom:1px dashed #3fb95066;" title="' + oUrlLabel + '">' + oIcao + '<span style="color:#8b949e;font-size:10px;font-weight:normal;">' + oIata + '</span></a>'
+          + '<span style="color:#c9d1d9;font-size:11px;margin-top:3px;text-align:center;white-space:normal;word-break:break-word;max-width:130px;line-height:1.3;">' + (oName || '<span style="color:#484f58;font-style:italic;">name unavailable</span>') + '</span>';
+      } else {
+        originBlock = '<span style="color:#484f58;font-weight:bold;font-size:13px;font-family:monospace;letter-spacing:0.5px;">Unknown</span>'
+          + '<span style="color:#484f58;font-size:10px;margin-top:3px;font-style:italic;">origin unknown</span>';
+      }
 
       var destBlock;
       if (r.destination && r.destination.icao) {
@@ -3359,14 +3526,13 @@
         destBlock = '<a href="' + dUrl + '" target="_blank" rel="noopener" style="color:#f85149;font-weight:bold;font-size:14px;font-family:monospace;text-decoration:none;border-bottom:1px dashed #f8514966;" title="' + dUrlLabel + '">' + dIcao + '<span style="color:#8b949e;font-size:10px;font-weight:normal;">' + dIata + '</span></a>'
           + '<span style="color:#c9d1d9;font-size:11px;margin-top:3px;text-align:center;white-space:normal;word-break:break-word;max-width:130px;line-height:1.3;">' + (dName || '<span style="color:#484f58;font-style:italic;">name unavailable</span>') + '</span>';
       } else {
-        destBlock = '<span style="color:#484f58;font-weight:bold;font-size:13px;font-family:monospace;letter-spacing:0.5px;">No data</span>'
+        destBlock = '<span style="color:#484f58;font-weight:bold;font-size:13px;font-family:monospace;letter-spacing:0.5px;">Unknown</span>'
           + '<span style="color:#484f58;font-size:10px;margin-top:3px;font-style:italic;">destination unknown</span>';
       }
 
       h += '<div style="padding:2px 14px 6px;display:flex;align-items:flex-start;gap:6px;">'
         + '<div style="display:flex;flex-direction:column;align-items:center;min-width:0;flex:1;">'
-        + '<a href="' + oUrl + '" target="_blank" rel="noopener" style="color:#3fb950;font-weight:bold;font-size:14px;font-family:monospace;text-decoration:none;border-bottom:1px dashed #3fb95066;" title="' + oUrlLabel + '">' + oIcao + '<span style="color:#8b949e;font-size:10px;font-weight:normal;">' + oIata + '</span></a>'
-        + '<span style="color:#c9d1d9;font-size:11px;margin-top:3px;text-align:center;white-space:normal;word-break:break-word;max-width:130px;line-height:1.3;">' + (oName || '<span style="color:#484f58;font-style:italic;">name unavailable</span>') + '</span>'
+        + originBlock
         + '</div>'
         + '<div style="display:flex;flex-direction:column;align-items:center;flex-shrink:0;padding-top:2px;">'
         + '<span style="color:#58a6ff;font-size:14px;letter-spacing:2px;">──▶</span>'
@@ -3706,6 +3872,18 @@
       + '<span id="sweden-trk-close" style="color:#8b949e;cursor:pointer;font-size:18px;line-height:1;">&times;</span>'
       + '</div>'
       + '<div id="sweden-trk-route" style="display:none;border-bottom:1px solid #30363d;background:#161b22;"></div>'
+      + '<div id="sweden-trk-mode-row" style="display:flex;gap:3px;padding:6px 12px;background:#161b22;border-bottom:1px solid #30363d;">'
+      + '<button id="sweden-trk-mode-live" type="button" style="flex:1;background:rgba(88,166,255,0.22);color:#58a6ff;border:1px solid #58a6ff66;border-radius:4px;padding:5px 6px;cursor:pointer;font-size:11px;font-family:monospace;font-weight:600;">Live fetching</button>'
+      + '<button id="sweden-trk-mode-full" type="button" style="flex:1;background:transparent;color:#8b949e;border:1px solid transparent;border-radius:4px;padding:5px 6px;cursor:pointer;font-size:11px;font-family:monospace;font-weight:600;">Entire flight route</button>'
+      + '</div>'
+      + '<div id="sweden-trk-filter-row" style="display:flex;align-items:center;gap:6px;padding:6px 12px;border-bottom:1px solid #30363d;font-size:11px;color:#8b949e;background:#161b22;font-family:monospace;user-select:none;">'
+      + '<span style="flex-shrink:0;">from</span>'
+      + '<input type="number" id="sweden-trk-alt-min" placeholder="ft" style="flex:1.2;min-width:50px;box-sizing:border-box;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:4px 6px;border-radius:4px;outline:none;font-size:11px;font-family:monospace;text-align:center;" />'
+      + '<input type="number" id="sweden-trk-speed-min" placeholder="kts" style="flex:1;min-width:40px;box-sizing:border-box;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:4px 6px;border-radius:4px;outline:none;font-size:11px;font-family:monospace;text-align:center;" />'
+      + '<span style="flex-shrink:0;">to</span>'
+      + '<input type="number" id="sweden-trk-alt-max" placeholder="ft" style="flex:1.2;min-width:50px;box-sizing:border-box;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:4px 6px;border-radius:4px;outline:none;font-size:11px;font-family:monospace;text-align:center;" />'
+      + '<input type="number" id="sweden-trk-speed-max" placeholder="kts" style="flex:1;min-width:40px;box-sizing:border-box;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;padding:4px 6px;border-radius:4px;outline:none;font-size:11px;font-family:monospace;text-align:center;" />'
+      + '</div>'
       + '<div style="padding:8px 12px 4px;border-bottom:1px solid #30363d;">'
       + '<input type="text" id="sweden-trk-global" placeholder="Search ALL zones..." style="width:100%;box-sizing:border-box;background:#161b22;border:1px solid #30363d;color:#c9d1d9;padding:6px 10px;border-radius:4px;outline:none;font-size:12px;font-family:monospace;" />'
       + '<div style="font-size:10px;color:#484f58;margin-top:4px;margin-bottom:2px;">&#9658; Left-click to copy &nbsp;&nbsp; Right-click to fly to point</div>'
@@ -3740,8 +3918,41 @@
 
     p.querySelector("#sweden-trk-close").onclick = toggleTrackerPanel;
 
+    function selectTrackerMode(mode) {
+      if (trackerTrackMode === mode) return;
+      trackerTrackMode = mode;
+      trackerBbox = null;
+      crossedIdents.clear();
+      currentTrackerData = { allPoints: [], zones: { crossed: [], "5nm": [], "10nm": [], "15nm": [], "20nm": [] } };
+      renderTrackerTrackMode(false);
+      updateTrackerData();
+    }
+    p.querySelector("#sweden-trk-mode-live").onclick = function () { selectTrackerMode("live"); };
+    p.querySelector("#sweden-trk-mode-full").onclick = function () { selectTrackerMode("full"); };
+
     p.querySelector("#sweden-trk-global").addEventListener("input", function (e) {
       globalTrackerQuery = e.target.value;
+      renderTrackerResults();
+    });
+
+    p.querySelector("#sweden-trk-alt-min").addEventListener("input", function (e) {
+      var val = parseInt(e.target.value, 10);
+      trackerMinAlt = isNaN(val) ? null : val;
+      renderTrackerResults();
+    });
+    p.querySelector("#sweden-trk-speed-min").addEventListener("input", function (e) {
+      var val = parseInt(e.target.value, 10);
+      trackerMinSpeed = isNaN(val) ? null : val;
+      renderTrackerResults();
+    });
+    p.querySelector("#sweden-trk-alt-max").addEventListener("input", function (e) {
+      var val = parseInt(e.target.value, 10);
+      trackerMaxAlt = isNaN(val) ? null : val;
+      renderTrackerResults();
+    });
+    p.querySelector("#sweden-trk-speed-max").addEventListener("input", function (e) {
+      var val = parseInt(e.target.value, 10);
+      trackerMaxSpeed = isNaN(val) ? null : val;
       renderTrackerResults();
     });
 
@@ -3759,13 +3970,20 @@
 
     // Reset state
     trackerBbox = null;
+    trackerTrackMode = "live";
     globalTrackerQuery = "";
     zoneQueries = { crossed: "", "5nm": "", "10nm": "", "15nm": "", "20nm": "" };
     currentTrackerData = { allPoints: [], zones: { crossed: [], "5nm": [], "10nm": [], "15nm": [], "20nm": [] } };
     trackerRouteInfo = null;
     trackerRouteCallsign = "";
+    trackerRouteFirstPt = null;
+    trackerRouteHasCompleteLeg = false;
     trackerRouteFetching = false;
     crossedIdents.clear();
+    trackerMinAlt = null;
+    trackerMinSpeed = null;
+    trackerMaxAlt = null;
+    trackerMaxSpeed = null;
 
     // First load + interval
     updateTrackerData();

@@ -1414,7 +1414,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           }
         }
         if (!best || bestDist > maxNm) return null;
-        return { icao: best.icao, iata: best.iata || null, country: best.country || null };
+        return { icao: best.icao, iata: best.iata || null, country: best.country || null, distanceNm: bestDist };
       }
 
       // FIX (Bug 2 — first point includes taxi):
@@ -1440,10 +1440,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       const originPt = findTakeoffPoint(pts);
       const lastPt = pts[pts.length - 1];
-      const MAX_NM = 30; // slightly wider than old 25 NM to catch large airport complexes
 
-      const originInfo = nearestAirport(originPt.lat, originPt.lon, MAX_NM);
-      const destInfo = nearestAirport(lastPt.lat, lastPt.lon, MAX_NM);
+      // A valid departure point should still be close to its airport. A wider
+      // radius can incorrectly select an unrelated airport when coverage began
+      // after the aircraft was already en route.
+      const originInfo = nearestAirport(originPt.lat, originPt.lon, 12);
+      let destInfo = null;
+      if (msg.requireCompletedArrival) {
+        // Do not label a random en-route airport as the destination when the
+        // stored trace ends early. Require an observed arrival near an airport.
+        const gs = Number(lastPt.gs);
+        const arrivalObserved = String(lastPt.alt).toLowerCase() === 'ground' ||
+          (Number.isFinite(gs) && gs <= 80);
+        if (arrivalObserved) destInfo = nearestAirport(lastPt.lat, lastPt.lon, 12);
+      }
 
       sendResponse({
         origin: originInfo ? { icao: originInfo.icao, iata: originInfo.iata, name: null, city: null, country: originInfo.country } : null,
