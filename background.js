@@ -23,13 +23,21 @@ const _routeCache = new Map(); // callsign → { ts, data } for adsbdb.com route
 // OurAirports name lookup (lazy-loaded)
 let _ourAirportsMap = null;      // ICAO -> name, null = not loaded
 let _ourAirportsList = null;     // [{icao, name, lat, lon, type, iata, city, country}] for nearby search
+let _ourAirportsSearchList = null; // all open airport-like records from airports.csv
 let _ourAirportsInfoMap = null;  // ICAO/IATA/local -> {icao, iata, name, city, country}
 let _ourAirportsLoading = false;
 let _ourAirportsWaiters = [];
 
+function _isHospitalAirport(name, type) {
+  if (type !== 'heliport') return false;
+  const lower = String(name || '').toLowerCase();
+  return ['hospital', 'medical', 'clinic', 'health', 'sjukhus', 'lasarett', 'klinik', 'v\u00e5rd', 'care']
+    .some(term => lower.includes(term));
+}
+
 function _parseOurAirportsCsv(text) {
   const lines = text.split(/\r?\n/);
-  if (!lines.length) return { map: new Map(), list: [], infoMap: new Map() };
+  if (!lines.length) return { map: new Map(), list: [], searchList: [], infoMap: new Map() };
   const headers = lines[0].split(',').map(h => h.replace(/^"|"$/g, '').trim());
   const iIdent = headers.indexOf('ident');
   const iGps   = headers.indexOf('gps_code');
@@ -44,6 +52,7 @@ function _parseOurAirportsCsv(text) {
   const map = new Map();
   const infoMap = new Map();
   const list = [];
+  const searchList = [];
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line) continue;
@@ -79,6 +88,19 @@ function _parseOurAirportsCsv(text) {
     const lat = parseFloat(cols[iLat]);
     const lon = parseFloat(cols[iLon]);
     const aType = (cols[iType] || '').trim();
+    if (!isNaN(lat) && !isNaN(lon) && icao && aType !== 'closed') {
+      searchList.push({
+        icao: icao,
+        name: name,
+        lat: lat,
+        lon: lon,
+        type: aType,
+        iata: iata || null,
+        city: city,
+        country: country,
+        isHospital: _isHospitalAirport(name, aType)
+      });
+    }
     if (!isNaN(lat) && !isNaN(lon) && (aType === 'large_airport' || aType === 'medium_airport' || aType === 'small_airport' || aType === 'heliport')) {
       if (icao) {
         const isHospital = aType === 'heliport' && (
@@ -106,7 +128,7 @@ function _parseOurAirportsCsv(text) {
       }
     }
   }
-  return { map, list, infoMap };
+  return { map, list, searchList, infoMap };
 }
 
 async function ensureOurAirportsLoaded() {
@@ -119,10 +141,12 @@ async function ensureOurAirportsLoaded() {
     const parsed = _parseOurAirportsCsv(text);
     _ourAirportsMap = parsed.map;
     _ourAirportsList = parsed.list;
+    _ourAirportsSearchList = parsed.searchList;
     _ourAirportsInfoMap = parsed.infoMap;
   } catch(e) {
     _ourAirportsMap = new Map();
     _ourAirportsList = [];
+    _ourAirportsSearchList = [];
     _ourAirportsInfoMap = new Map();
   }
   _ourAirportsLoading = false;
@@ -901,6 +925,56 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ fixes: result, count: airportFixes.length });
     return true;
   }
+  // Search actual airports from airports.csv (not CIFP procedure waypoints).
+  if (msg.type === "SEARCH_AIRPORTS") {
+    const respond = async () => {
+      await ensureOurAirportsLoaded();
+      const q = String(msg.query || "").trim().toUpperCase();
+      if (!q) { sendResponse({ airports: [] }); return; }
+
+      const bbox = msg.bbox || null;
+      const scored = [];
+      for (const airport of (_ourAirportsSearchList || [])) {
+        if (bbox) {
+          const { minLat, maxLat, minLon, maxLon } = bbox;
+          if (airport.lat < minLat || airport.lat > maxLat || airport.lon < minLon || airport.lon > maxLon) continue;
+        }
+
+        const fields = [airport.icao, airport.iata, airport.name, airport.city, airport.country].filter(Boolean);
+        let score = 0;
+        for (const value of fields) {
+          const upper = String(value).toUpperCase();
+          const normalizedValue = upper.replace(/[^A-Z0-9]/g, "");
+          const normalizedQuery = q.replace(/[^A-Z0-9]/g, "");
+          score = Math.max(score, soundScore(normalizedValue, normalizedQuery));
+          if (upper === q) score = Math.max(score, 1000);
+          else if (upper.startsWith(q)) score = Math.max(score, 500);
+          else if (upper.includes(q)) score = Math.max(score, 250);
+        }
+        if (score > 0) scored.push({ airport, score });
+      }
+
+      scored.sort((a, b) => b.score - a.score || a.airport.icao.localeCompare(b.airport.icao));
+      sendResponse({
+        airports: scored.slice(0, 50).map(({ airport }) => ({
+          ident: airport.icao,
+          lat: airport.lat,
+          lon: airport.lon,
+          type: "airport",
+          airportType: airport.type,
+          isHospital: airport.isHospital,
+          name: airport.name,
+          airport: airport.iata || null,
+          city: airport.city,
+          country: airport.country,
+          procs: []
+        }))
+      });
+    };
+    respond();
+    return true;
+  }
+
   if (msg.type === "OPEN_POPUP") {
     if (chrome.action && chrome.action.openPopup) {
       chrome.action.openPopup().then(() => sendResponse({ ok: true })).catch(err => {

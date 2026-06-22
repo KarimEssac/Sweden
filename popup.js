@@ -230,6 +230,9 @@ btnSelectArea.addEventListener("mouseout", () => {
 });
 
 // ── Search Mode (3-way: all / view / airport) ────────────────────────────────
+const searchSectionTitle = document.getElementById("searchSectionTitle");
+const targetWaypoints = document.getElementById("targetWaypoints");
+const targetAirports = document.getElementById("targetAirports");
 const modeAll = document.getElementById("modeAll");
 const modeView = document.getElementById("modeView");
 const modeAirport = document.getElementById("modeAirport");
@@ -239,10 +242,27 @@ const icaoStatus = document.getElementById("icaoStatus");
 const modeBtns = [modeAll, modeView, modeAirport];
 
 let searchMode = "all"; // "all" | "view" | "airport"
+let searchTarget = "waypoints"; // "waypoints" | "airports"
 let airportIcao = "";   // current ICAO for airport mode
 let airportFixCount = 0;
 
 const MODE_COLORS = { all: "#3fb950", view: "#58a6ff", airport: "#f07178" };
+
+function setSearchTarget(target) {
+  searchTarget = target === "airports" ? "airports" : "waypoints";
+
+  const searchingAirports = searchTarget === "airports";
+  searchSectionTitle.textContent = searchingAirports ? "Search Airport" : "Search Waypoint";
+  targetWaypoints.style.background = searchingAirports ? "transparent" : "#f0f6fc";
+  targetWaypoints.style.color = searchingAirports ? "#8b949e" : "#0d1117";
+  targetAirports.style.background = searchingAirports ? "#f0f6fc" : "transparent";
+  targetAirports.style.color = searchingAirports ? "#0d1117" : "#8b949e";
+
+  modeAirport.style.display = searchingAirports ? "none" : "";
+  if (searchingAirports && searchMode === "airport") setSearchMode("all");
+  else setSearchMode(searchMode);
+  searchBox.placeholder = searchingAirports ? "Type airport code or name" : "Type fix ident";
+}
 
 function setSearchMode(mode) {
   searchMode = mode;
@@ -272,10 +292,12 @@ function setSearchMode(mode) {
     if (airportIcao) loadAirportFixes();
   } else {
     searchBox.style.display = "";
-    searchBox.placeholder = "Type fix ident";
+    searchBox.placeholder = searchTarget === "airports" ? "Type airport code or name" : "Type fix ident";
   }
 }
 
+targetWaypoints.addEventListener("click", () => setSearchTarget("waypoints"));
+targetAirports.addEventListener("click", () => setSearchTarget("airports"));
 modeAll.addEventListener("click", () => setSearchMode("all"));
 modeView.addEventListener("click", () => setSearchMode("view"));
 modeAirport.addEventListener("click", () => setSearchMode("airport"));
@@ -327,13 +349,19 @@ async function loadAirportFixes() {
 }
 
 // ── Restore search mode ──────────────────────────────────────────────────────
-chrome.storage.local.get(["wpt_searchMode", "wpt_airportIcao"], (data) => {
+chrome.storage.local.get(["wpt_searchMode", "wpt_airportIcao", "wpt_lastSearch"], (data) => {
   if (data.wpt_airportIcao) {
     airportIcao = data.wpt_airportIcao;
     icaoInput.value = airportIcao;
   }
-  const mode = data.wpt_searchMode || "all";
-  setSearchMode(mode);
+  searchMode = data.wpt_searchMode || "all";
+  setSearchTarget("waypoints");
+  const lastQ = data.wpt_lastSearch || "";
+  if (lastQ) {
+    searchBox.value = lastQ;
+    document.body.classList.add("searching");
+    doSearch(lastQ);
+  }
 });
 
 // ── Helper: get current map bbox from content script ─────────────────────────
@@ -376,7 +404,15 @@ async function doSearch(q) {
   try {
     let fixes = [];
 
-    if (searchMode === "airport") {
+    if (searchTarget === "airports") {
+      const searchMsg = { type: "SEARCH_AIRPORTS", query: q };
+      if (searchMode === "view") {
+        const bbox = await getMapBbox();
+        if (bbox) searchMsg.bbox = bbox;
+      }
+      const res = await chrome.runtime.sendMessage(searchMsg);
+      fixes = res.airports || [];
+    } else if (searchMode === "airport") {
       // Search within airport fixes
       if (!airportIcao) {
         searchResults.innerHTML = `<div class="no-results">Enter an ICAO code first</div>`;
@@ -445,6 +481,22 @@ function getProcCopyText(fix) {
   return `${displayName} ${numWords}`;
 }
 
+function nearbyAirportStyle(airport) {
+  if (!airport || !airport.airportType) return null;
+  if (airport.airportType === "heliport") {
+    return airport.isHospital
+      ? { identColor: "#ff7b72", typeColor: "#ff7b72", label: "HSP" }
+      : { identColor: "#a5d6ff", typeColor: "#58a6ff", label: "HPD" };
+  }
+  if (airport.airportType === "large_airport") {
+    return { identColor: "#FED8B1", typeColor: "#58a6ff", label: "LRG" };
+  }
+  if (airport.airportType === "medium_airport") {
+    return { identColor: "#FED8B1", typeColor: "#3fb950", label: "MED" };
+  }
+  return { identColor: "#FED8B1", typeColor: "#8b949e", label: "SML" };
+}
+
 function renderResults(fixes) {
   if (!fixes.length) {
     searchResults.innerHTML = `<div class="no-results">No results found</div>`;
@@ -455,7 +507,8 @@ function renderResults(fixes) {
   const fixColor = togFixColor.value;
 
   searchResults.innerHTML = fixes.map(f => {
-    let color = f.type === "vfr" ? "#9966CC" : f.type === "vor" ? "#58a6ff" : f.type === "ndb" ? "#f85149" : f.type === "moa" ? "rgba(230, 130, 255, 0.9)" : f.type === "fbo" ? "#DFFF00" : f.type === "airport" ? fixColor : fixColor;
+    const airportStyle = nearbyAirportStyle(f);
+    let color = airportStyle ? airportStyle.identColor : f.type === "vfr" ? "#9966CC" : f.type === "vor" ? "#58a6ff" : f.type === "ndb" ? "#f85149" : f.type === "moa" ? "rgba(230, 130, 255, 0.9)" : f.type === "fbo" ? "#DFFF00" : f.type === "airport" ? fixColor : fixColor;
     let isMythic = false;
     let pLabel = f.ident;
     let pMeta = "";
@@ -483,7 +536,9 @@ function renderResults(fixes) {
     if (f.type === "fbo") pLabel = pLabel.toUpperCase();
 
     const nameStr = (f.name && f.type !== "fbo") ? ` <span style="color:#8b949e;font-weight:normal">(${f.name})</span>` : "";
-    const airportStr = f.airport ? `<span style="color:#3fb950;font-size:10px;margin-left:5px;background:#0d2b12;border-radius:3px;padding:1px 4px;">${f.airport}</span>` : "";
+    const airportStr = f.airport ? airportStyle
+      ? `<span style="color:#8b949e;font-size:10px;margin-left:5px;">(${f.airport})</span>`
+      : `<span style="color:#3fb950;font-size:10px;margin-left:5px;background:#0d2b12;border-radius:3px;padding:1px 4px;">${f.airport}</span>` : "";
     
     const procCopyText = getProcCopyText(f);
     let defaultCopy = (f.ident || "").toUpperCase();
@@ -493,6 +548,8 @@ function renderResults(fixes) {
       defaultCopy = f.name ? f.name.replace(/\s*MOA$/i, "").replace(/[0-9]+/g, "").replace(/\s+/g, " ").trim().toLowerCase() : f.ident;
     } else if (f.type === "vfr") {
       defaultCopy = f.name ? f.name.toUpperCase() : f.ident.toUpperCase();
+    } else if (f.type === "airport") {
+      defaultCopy = f.ident.toUpperCase();
     } else if (f.name) {
       defaultCopy = f.name.toUpperCase();
     }
@@ -504,11 +561,12 @@ function renderResults(fixes) {
         <div class="result-ident" style="color:${color}">${pLabel}${pMeta}${nameStr}${airportStr}</div>
         <div class="result-coords">${f.lat.toFixed(4)}° / ${f.lon.toFixed(4)}°</div>
       </div>
-      <span class="result-type">${typeLabel(f.type)}</span>
+      <span class="result-type"${airportStyle ? ` style="color:${airportStyle.typeColor};border:1px solid ${airportStyle.typeColor}44;"` : ""}>${airportStyle ? airportStyle.label : typeLabel(f.type)}</span>
     </div>
   `}).join("");
 
-  searchResults.querySelectorAll(".result-item").forEach(el => {
+  searchResults.querySelectorAll(".result-item").forEach((el, index) => {
+    const result = fixes[index];
     el.addEventListener("click", async () => {
       const lat = parseFloat(el.dataset.lat);
       const lon = parseFloat(el.dataset.lon);
@@ -544,7 +602,15 @@ function renderResults(fixes) {
         chrome.tabs.sendMessage(tabs[0].id, {
           __wpt_source: "popup",
           type: "WPT_HIGHLIGHT",
-          ident: el.dataset.ident
+          ident: el.dataset.ident,
+          airport: result && result.airportType ? {
+            icao: result.ident,
+            name: result.name,
+            lat: result.lat,
+            lon: result.lon,
+            type: result.airportType,
+            isHospital: !!result.isHospital
+          } : null
         }).catch(() => {});
       } catch (e) {}
     });
@@ -569,13 +635,3 @@ function typeColor(t) {
 function typeLabel(t) {
   return t === "vfr" ? "VFR" : t === "vor" ? "VOR" : t === "ndb" ? "NDB" : t === "moa" ? "MOA" : t === "fbo" ? "FBO" : t === "airport" ? "APT" : "FIX";
 }
-
-// ── Restore last search on popup reopen ───────────────────────────────────────
-chrome.storage.local.get("wpt_lastSearch", (data) => {
-  const lastQ = data.wpt_lastSearch || "";
-  if (lastQ) {
-    searchBox.value = lastQ;
-    document.body.classList.add("searching");
-    doSearch(lastQ);
-  }
-});

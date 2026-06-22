@@ -18,6 +18,10 @@ An ADS-B Exchange browser extension that overlays flight waypoints, fixes, VORs,
 - **Current View**: Search only within the currently visible map area.
 - **Airport (ICAO)**: Enter an airport ICAO code (e.g., KLAX) to load all waypoints associated with that airport, then search within them.
 
+### Search Airport (2 Modes)
+- Toggle the popup search to **Airports** to search the bundled `airports.csv` dataset by airport code or name.
+- **All Available** searches the full airport dataset; **Current View** limits results to the visible map area.
+
 All search modes use the **advanced fuzzy search algorithm**, which combines:
 - Position-aware sound similarity (phonetic matching)
 - Consonant skeleton comparison

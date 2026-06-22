@@ -40,6 +40,7 @@
   let lastBbox = null;
   let loadTimer = null;
   let _highlightIdent = null;  // ident string to glow on map (set by popup hover)
+  let _highlightAirport = null; // full airport record for popup search hover
 
   // ── Bridge: page <-> extension content script ─────────────────────────────
   let _reqId = 0;
@@ -53,6 +54,10 @@
       Settings[msg.key] = msg.value;
       // Hide quick-access button when popup/overlay/panel is active
       if (msg.key === "__hideQAB") {
+        if (!msg.value) {
+          _highlightIdent = null;
+          _highlightAirport = null;
+        }
         const btn = document.getElementById("wpt-quick-access-btn");
         if (btn) {
           // Only restore if user has showBtn enabled
@@ -74,6 +79,8 @@
       return;
     }
     if (msg.type === "WPT_FLY_TO") {
+      _highlightIdent = null;
+      _highlightAirport = null;
       flyToFix(msg.lat, msg.lon, msg.zoom);
       return;
     }
@@ -92,6 +99,7 @@
     }
     if (msg.type === "WPT_HIGHLIGHT") {
       _highlightIdent = msg.ident || null;
+      _highlightAirport = msg.airport || null;
       return;
     }
 
@@ -820,8 +828,8 @@
       }
 
       // Draw highlighted nearby airport to ensure glowing effect triggers even if not in allFixes
-      if (_highlightIdent && typeof _nearbyAirports !== 'undefined' && _nearbyAirports.length > 0) {
-        const highlightedNearby = _nearbyAirports.find(a => a.icao === _highlightIdent);
+      if (_highlightIdent && (_highlightAirport || (typeof _nearbyAirports !== 'undefined' && _nearbyAirports.length > 0))) {
+        const highlightedNearby = _highlightAirport || _nearbyAirports.find(a => a.icao === _highlightIdent);
         if (highlightedNearby) {
           const pt = latLonToPixel(highlightedNearby.lat, highlightedNearby.lon);
           if (pt && pt.x >= -30 && pt.x <= canvas.width + 30 && pt.y >= -30 && pt.y <= canvas.height + 30) {
